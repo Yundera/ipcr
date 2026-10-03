@@ -16,8 +16,8 @@ name: ipcr-forge
 # (IPCR's published.json, served as /images.json). <name> is the IPNS key IPCR minted for the
 # repository (k51…), not the repository's name, which is why the page lists it.
 #
-# Every service is copied verbatim from its standalone listing (apps/Radicle, apps/Gitea,
-# apps/Radicle-Gitea-Bridge, apps/IPCR), so each keeps its own comments and rationale.md.
+# Every service is copied verbatim from its standalone listing (Apps/Radicle, Apps/Gitea,
+# Apps/Radicle-Gitea-Bridge, Apps/IPCR), so each keeps its own comments and rationale.md.
 # Only the data folders move, one subfolder per part: $AppID/{radicle,gitea,bridge,ipcr}/.
 #
 # Replaces those four apps; it cannot sit beside them. It uses the same container names,
@@ -77,7 +77,7 @@ services:
       - pcs
 
   # ═══ Radicle — the source of truth ═════════════════════════════════════════════
-  # Verbatim from apps/Radicle; only its data folder moves to $AppID/radicle/.
+  # Verbatim from Apps/Radicle; only its data folder moves to $AppID/radicle/.
 
   # The web UI: the Radicle Explorer bundle served as static files by Caddy.
   # It is a pure client-side app — every request it makes goes from the visitor's
@@ -203,7 +203,7 @@ services:
       - radicle-internal
 
   # ═══ Gitea — CI and the staging registry ═══════════════════════════════════════
-  # Verbatim from apps/Gitea; only its data folder moves to $AppID/gitea/.
+  # Verbatim from Apps/Gitea; only its data folder moves to $AppID/gitea/.
 
   # Gitea itself — git hosting, the Actions controller, and the OCI package
   # registry, all in one process. SQLite: a personal forge never has the write
@@ -328,7 +328,7 @@ services:
       - gitea-internal
 
   # ═══ Radicle → Gitea bridge ════════════════════════════════════════════════════
-  # Verbatim from apps/Radicle-Gitea-Bridge; only its data folder moves to $AppID/bridge/.
+  # Verbatim from Apps/Radicle-Gitea-Bridge; only its data folder moves to $AppID/bridge/.
 
   radicle-gitea-bridge:
     image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
@@ -373,7 +373,7 @@ services:
       - pcs
 
   # ═══ IPCR — the IPFS container registry ════════════════════════════════════════
-  # Verbatim from apps/IPCR; only its data folder moves to $AppID/ipcr/.
+  # Verbatim from Apps/IPCR; only its data folder moves to $AppID/ipcr/.
 
   # ── The registry Docker talks to ────────────────────────────────────────────
   # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
@@ -523,13 +523,13 @@ networks:
   pcs:
     name: ${APP_NET:-pcs}
     external: true
-  # From apps/Radicle: egress only, for the node.
+  # From Apps/Radicle: egress only, for the node.
   radicle-internal:
     driver: bridge
-  # From apps/Gitea: gitea ↔ runner, nothing else.
+  # From Apps/Gitea: gitea ↔ runner, nothing else.
   gitea-internal:
     driver: bridge
-  # From apps/IPCR: gateway ↔ registry ↔ kubo, nothing else.
+  # From Apps/IPCR: gateway ↔ registry ↔ kubo, nothing else.
   ipcr-internal:
     driver: bridge
 

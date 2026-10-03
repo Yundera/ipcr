@@ -174,9 +174,9 @@ from this server and from every other server that already pulled it.</p>
 <p>Install <b>IPCR</b> from the App Store. There is nothing to configure.</p>
 <h3>On any Linux server with Docker 29+</h3>
 <pre><code>mkdir -p /DATA/AppData/ipcr &amp;&amp; cd /DATA/AppData/ipcr
-curl -fsSLO https://raw.githubusercontent.com/Yundera/ipcr/main/apps/IPCR/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Yundera/ipcr/main/Apps/IPCR/docker-compose.yml
 install -d -m 0700 -o 1000 -g 1000 kubo &amp;&amp; install -d -o 1000 -g 1000 init.d
-curl -fsSL -o init.d/01-ipcr-node.sh https://raw.githubusercontent.com/Yundera/ipcr/main/apps/IPCR/seed/init.d/01-ipcr-node.sh
+curl -fsSL -o init.d/01-ipcr-node.sh https://raw.githubusercontent.com/Yundera/ipcr/main/Apps/IPCR/seed/init.d/01-ipcr-node.sh
 chmod 0755 init.d/01-ipcr-node.sh
 printf 'PUID=1000\nPGID=1000\nTZ=UTC\nAppID=ipcr\n' &gt; .env
 docker compose up -d</code></pre>

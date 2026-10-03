@@ -17,19 +17,19 @@ file that uses it works on any host running IPCR, and the image comes from which
 
 - **[docs/spec.md](docs/spec.md)**: the IPCR convention (address, paths, tag layout, image format).
 - **[docs/design.md](docs/design.md)**: why it is built this way, findings, open items.
-- **[apps/IPCR/](apps/IPCR/)**: the Yundera AppStore listing.
+- **[Apps/IPCR/](Apps/IPCR/)**: the Yundera AppStore listing.
 
 ## Install
 
-**On a Yundera PCS:** install **IPCR** from the AppStore (listing in [apps/IPCR/](apps/IPCR/)).
+**On a Yundera PCS:** install **IPCR** from the AppStore (listing in [Apps/IPCR/](Apps/IPCR/)).
 
 **Anywhere else (Docker 29+, containerd image store):** run the same compose by hand:
 
 ```sh
 mkdir -p /DATA/AppData/ipcr && cd /DATA/AppData/ipcr
-curl -fsSLO https://raw.githubusercontent.com/Yundera/ipcr/main/apps/IPCR/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Yundera/ipcr/main/Apps/IPCR/docker-compose.yml
 install -d -m 0700 -o 1000 -g 1000 kubo && install -d -o 1000 -g 1000 init.d
-curl -fsSL -o init.d/01-ipcr-node.sh https://raw.githubusercontent.com/Yundera/ipcr/main/apps/IPCR/seed/init.d/01-ipcr-node.sh
+curl -fsSL -o init.d/01-ipcr-node.sh https://raw.githubusercontent.com/Yundera/ipcr/main/Apps/IPCR/seed/init.d/01-ipcr-node.sh
 chmod 0755 init.d/01-ipcr-node.sh
 printf 'PUID=1000\nPGID=1000\nTZ=UTC\nAppID=ipcr\n' > .env
 docker compose up -d
@@ -113,7 +113,7 @@ docker compose run --rm cli ipcr push <image> [<app>[:<tag>]]
 gateway/         ipcrd — the IPCR gateway (Go, stdlib only)
 bin/             entrypoint (roles: gateway | registry | ipcr) and the ipcr CLI
 Dockerfile       one image for every role: ghcr.io/yundera/ipcr
-apps/IPCR/       AppStore listing: compose, rationale, seed, assets
+Apps/          AppStore listings (IPCR, IPCR-Forge, IPCR-Demo); listing: compose, rationale, seed, assets
 docs/            spec and design notes
 ```
 
@@ -128,5 +128,5 @@ Images are built by GitHub Actions ([.github/workflows/image.yml](.github/workfl
 | push to `main` | `main`, `sha-<short>` |
 | pull request | built, not pushed |
 
-To release: bump the image tag in `apps/IPCR/docker-compose.yml` and in this README, commit, then
+To release: bump the image tag in `Apps/IPCR*/docker-compose.yml` and in this README, commit, then
 `git tag v1.1.0 && git push origin v1.1.0`.

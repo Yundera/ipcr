@@ -1,4 +1,4 @@
-# Development stack: builds the image from this checkout. The store app lives in apps/IPCR/.
+# Development stack: builds the image from this checkout. The store app lives in Apps/IPCR/.
 #   docker compose up -d --build
 #   docker compose run --rm cli ipcr push <image> [<app>[:<tag>]]
 name: ipcr-dev
@@ -18,7 +18,7 @@ services:
       IPFS_PROFILE: lowpower
     volumes:
       - ./data/kubo:/data/ipfs
-      - ./apps/IPCR/seed/init.d:/container-init.d:ro   # same node config as the store app
+      - ./Apps/IPCR/seed/init.d:/container-init.d:ro   # same node config as the store app
     ports:
       - "4768:4768/tcp"           # swarm; 4001 is left to the Kubo store app
       - "4768:4768/udp"
