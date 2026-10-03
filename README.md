@@ -54,7 +54,7 @@ is a one-off command, not something the installed app exposes:
 docker pull nginxdemos/hello:0.4        # or any image you built
 docker run --rm --network ipcr_ipcr-internal \
   -v /run/containerd/containerd.sock:/run/containerd/containerd.sock \
-  ghcr.io/yundera/ipcr:0.1.0 ipcr push nginxdemos/hello:0.4 hello:0.4
+  ghcr.io/yundera/ipcr:1.1.0 ipcr push nginxdemos/hello:0.4 hello:0.4
 ```
 
 ```
@@ -74,6 +74,32 @@ Other commands, same `docker run` prefix: `ipcr pin <cid>`, `ipcr tag <app> <tag
 
 Requires Docker's containerd image store (default since Docker 29), where images live in containerd
 namespace `moby`.
+
+## Import from a registry (no containerd)
+
+`ipcrd import` copies an image from any OCI registry straight into IPFS, in the same format and
+with the same CIDs as `nerdctl push` (verified: `nginxdemos/hello:0.4` imports to the same root
+CID). It needs no Docker or containerd socket:
+
+```sh
+docker exec ipcr-gateway ipcr import docker.io/nginxdemos/hello:0.4 hello:0.4
+```
+
+Only the host's platform is kept (`IMPORT_PLATFORM=linux/arm64` to choose another).
+
+### Follow a registry
+
+Set `IPCR_IMPORT_WATCH` (in the app's `.env`, or the app settings) to a registry URL and IPCR
+polls it every minute. Every tag of every repository in its catalog (or of `IPCR_IMPORT_REPOS`)
+is imported and published as `ipcr.localhost:4767/ipns/<owner-repo-key>:<tag>`. A tag is
+re-imported when its digest moves. This is how the forge's Gitea builds reach IPFS:
+
+```sh
+IPCR_IMPORT_WATCH=https://gitea-<domain>
+IPCR_IMPORT_AUTH=gitea_admin:<token with read:package>   # or IMPORT_AUTH_FILE=/path/to/file
+```
+
+The credentials are sent to the watched host only.
 
 ## Develop
 
@@ -97,9 +123,9 @@ Images are built by GitHub Actions ([.github/workflows/image.yml](.github/workfl
 
 | Event | Tags pushed to `ghcr.io/yundera/ipcr` |
 | --- | --- |
-| push of tag `v0.1.0` | `0.1.0`, `0.1` |
+| push of tag `v1.1.0` | `1.1.0`, `1.1`, `latest` |
 | push to `main` | `main`, `sha-<short>` |
 | pull request | built, not pushed |
 
 To release: bump the image tag in `apps/IPCR/docker-compose.yml` and in this README, commit, then
-`git tag v0.1.0 && git push origin v0.1.0`.
+`git tag v1.1.0 && git push origin v1.1.0`.

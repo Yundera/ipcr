@@ -23,6 +23,17 @@ case "${1:-}" in
       echo "dnslink:  _dnslink.<your-domain>  TXT  \"dnslink=/ipns/$name\"   → $REG/ipns/<your-domain>:$tag"
     fi
     ;;
+  import)
+    # From a registry, without containerd: ipcr import <registry ref> [<app>[:<tag>]]
+    shift
+    out=$(ipcrd import "$@")
+    cid=$(echo "$out" | sed -n 1p); name=$(echo "$out" | sed -n 2p)
+    echo "pull:     $REG/ipfs/$cid"
+    if [ -n "$name" ]; then
+      tag=${2#*:}; [ "$tag" = "$2" ] && tag=latest
+      echo "pull:     $REG/ipns/$name:$tag"
+    fi
+    ;;
   pin|tag|resolve) exec ipcrd "$@" ;;
-  *) echo "usage: ipcr push <image> [<app>[:<tag>]] | pin <cid> | tag <app> <tag> <cid> | resolve <name> [tag]" >&2; exit 2 ;;
+  *) echo "usage: ipcr push <image> [<app>[:<tag>]] | import <ref> [<app>[:<tag>]] | pin <cid> | tag <app> <tag> <cid> | resolve <name> [tag]" >&2; exit 2 ;;
 esac

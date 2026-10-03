@@ -78,8 +78,17 @@ Because blobs are linked only through `urls` inside JSON, **not** through IPLD l
 CID alone does not retain the image. A node that wants to keep or re-share an image MUST pin every
 CID reachable through `urls`. Implementations SHOULD do this for every image they serve.
 
-A multi-platform index MAY omit the `ipfs://` URL on platforms that were not published. Pulling
-those platforms then fails, and pulling the published ones works.
+Converting an image (from a registry or a local store) into this format means, as containerd's
+converter does with Docker→OCI conversion on:
+
+- Docker media types become OCI ones, on documents and on descriptors.
+- Index entries whose platform was not published are **removed** from the index. Entries
+  without a platform are kept.
+- Manifests and indexes are re-encoded as JSON in OCI image-spec field order. Layers and
+  configs keep their bytes; only their descriptors gain `urls`.
+- Every object is added with `cid-version=1` and default chunking.
+
+Two conforming converters fed the same image therefore produce the same CIDs.
 
 ## 5. Behaviour
 

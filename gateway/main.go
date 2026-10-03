@@ -4,6 +4,7 @@
 //	pin <rootCID>...          pin an nerdctl IPFS image *and every blob it references*
 //	tag <app> <tag> <rootCID> add a tag to the app's tag directory (MFS) and publish it under IPNS key <app>
 //	resolve <name> [tag]      print the root CID a name/tag resolves to
+//	import <ref> [app:tag]    copy an image from any registry into IPFS (no containerd), optionally tag it
 //	health [url]              exit 0 if url (default: this gateway's /v2/) answers 200 — for healthchecks
 //
 // nerdctl stores each blob as its own IPFS object and links them only via `urls: ["ipfs://…"]`
@@ -80,6 +81,25 @@ func main() {
 		if name, err = tagImage(ctx, args[0], args[1], args[2]); err == nil {
 			fmt.Println(name)
 		}
+	case "import":
+		if len(args) < 1 || len(args) > 2 {
+			usage()
+		}
+		var root string
+		if root, err = importImage(ctx, args[0]); err != nil {
+			break
+		}
+		fmt.Println(root)
+		if len(args) == 2 {
+			app, tag, _ := strings.Cut(args[1], ":")
+			if tag == "" {
+				tag = "latest"
+			}
+			var name string
+			if name, err = tagImage(ctx, app, tag, root); err == nil {
+				fmt.Println(name)
+			}
+		}
 	case "health":
 		u := "https://127.0.0.1" + listen + "/v2/"
 		if len(args) > 0 {
@@ -107,7 +127,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: ipcrd serve | pin <cid>... | tag <app> <tag> <cid> | resolve <name> [tag] | health [url]")
+	fmt.Fprintln(os.Stderr, "usage: ipcrd serve | pin <cid>... | tag <app> <tag> <cid> | resolve <name> [tag] | import <ref> [app:tag] | health [url]")
 	os.Exit(2)
 }
 
@@ -452,6 +472,14 @@ func serve() error {
 		}
 		ociError(w, http.StatusNotFound, code, ref+" not found under /ipns/"+name)
 	})
+
+	if w := os.Getenv("IMPORT_WATCH"); w != "" {
+		every, err := time.ParseDuration(env("IMPORT_INTERVAL", "60s"))
+		if err != nil {
+			return fmt.Errorf("IMPORT_INTERVAL: %w", err)
+		}
+		go watch(context.Background(), w, every, env("STATE_DIR", "/data/state"))
+	}
 
 	log.Printf("listening on %s (kubo %s, nerdctl registry %s, auto-pin %v, tls %v)", listen, kuboAPI, upstream, autoPin, tlsDir != "")
 	if tlsDir == "" {

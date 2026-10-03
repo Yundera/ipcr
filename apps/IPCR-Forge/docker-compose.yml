@@ -7,8 +7,8 @@ name: ipcr-forge
 #     → radicle-gitea-bridge              copies repos that commit .gitea/workflows/
 #     → gitea + gitea-runner              GitHub-style Actions build the image
 #     → gitea registry                    staging: gitea-<domain>/gitea_admin/<app>:1.2.3
-#     ┄ (not wired yet) package webhook → IPCR import
-#     → ipcr-kubo / ipcr-registry / ipcr-gateway
+#     → ipcr-gateway follows Gitea's registry   imports every tag into IPFS, publishes IPNS
+#     → ipcr-kubo / ipcr-registry
 #   docker pull ipcr.localhost:4767/ipns/<name>:1.2.3         (anyone)
 #
 # Every service is copied verbatim from its standalone listing (apps/Radicle, apps/Gitea,
@@ -18,9 +18,10 @@ name: ipcr-forge
 # Replaces those four apps; it cannot sit beside them. It uses the same container names,
 # domains (radicle-, radicle-api-, gitea-) and host ports (8776, 4768, 127.0.0.1:4767).
 #
-# The handoff from Gitea's registry to IPFS is the one missing link: the runner's jobs run in
-# a nested Docker that cannot reach ipcr.localhost (it is the *host's* loopback), so the
-# import has to run on IPCR's side, triggered by Gitea's "package published" webhook.
+# The handoff from Gitea's registry to IPFS is a pull, run by IPCR: the runner's jobs run in a
+# nested Docker that cannot reach ipcr.localhost (the *host's* loopback), so CI never pushes to
+# IPCR. Instead ipcr-gateway polls gitea:3000 over gitea-internal, with a read-only token the
+# bridge-credentials step mints. Gitea does not know IPCR exists.
 
 services:
   # ═══ Radicle — the source of truth ═════════════════════════════════════════════
@@ -326,7 +327,7 @@ services:
   # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
   # registry below, resolves /ipns/<name>:<tag> itself, and pins every image it serves.
   ipcr-gateway:
-    image: ghcr.io/yundera/ipcr:0.1.0
+    image: ghcr.io/yundera/ipcr:1.1.0
     container_name: ipcr-gateway
     # Root for one reason: it writes its CA into the host's Docker trust store (the narrow
     # bind below), which is root-owned. See rationale.md.
@@ -343,8 +344,25 @@ services:
       CA_EXPORT: /certs.d/ipcr.localhost:4767/ca.crt
       # Pin every image this host pulls, so the node keeps — and re-shares — what it runs.
       AUTO_PIN: "true"
+      # Optional: follow a registry. Every tag of every repository it lists (or of
+      # IPCR_IMPORT_REPOS) is copied into IPFS and published as /ipns/<owner-repo>:<tag>;
+      # a tag is re-imported when it moves. Empty = off. IPCR_IMPORT_AUTH is user:token,
+      # a read-only (read:package) token is enough.
+      # Forge: watch this app's own Gitea, over gitea-internal (not through Caddy).
+      IMPORT_WATCH: ${IPCR_IMPORT_WATCH:-http://gitea:3000}
+      IMPORT_AUTH: ${IPCR_IMPORT_AUTH:-}
+      # Forge: a read:package token the bridge-credentials step mints. Re-read every poll
+      # and preferred over IMPORT_AUTH, so it may appear after the gateway is up.
+      IMPORT_AUTH_FILE: /data/secrets/registry-auth
+      IMPORT_REPOS: ${IPCR_IMPORT_REPOS:-}
+      IMPORT_INTERVAL: 60s
+      STATE_DIR: /data/state
     volumes:
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/tls:/data/tls
+      # What the watcher already imported (tag → manifest digest).
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/state:/data/state
+      # Forge only: the credential above. Read-only here.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/secrets:/data/secrets:ro
       # The host's Docker trust store, so the CA above can be dropped into it: no daemon
       # reload, no daemon.json edit. The parent is mounted because Compose cannot create a
       # bind source whose name contains a colon (ipcr.localhost:4767). ipcrd writes exactly
@@ -364,6 +382,8 @@ services:
       start_period: 10s
     networks:
       - ipcr-internal
+      # Forge only: reaches gitea:3000 for the import poller above.
+      - gitea-internal
     cpu_shares: 50
     deploy:
       resources:
@@ -373,7 +393,7 @@ services:
   # ── Stock nerdctl IPFS registry ─────────────────────────────────────────────
   # `nerdctl ipfs registry serve`, unmodified: translates the registry API into IPFS reads.
   ipcr-registry:
-    image: ghcr.io/yundera/ipcr:0.1.0
+    image: ghcr.io/yundera/ipcr:1.1.0
     container_name: ipcr-registry
     # Root because nerdctl run as any other uid assumes rootless mode and refuses to start
     # without a rootless containerd — which `ipfs registry serve` never uses. The service has
@@ -515,8 +535,9 @@ x-casaos:
 
         **Ports.** TCP 8776 (Radicle peers) and 4768 TCP+UDP (IPFS peers) are published.
 
-        **Not wired yet:** images reach Gitea's registry automatically, but publishing them to
-        IPFS is still a manual `ipcr push` (see the IPCR README).
+        **Images reach IPFS on their own.** IPCR follows this app's Gitea registry: about a
+        minute after a build pushes `gitea_admin/<repo>:<tag>`, it can be pulled as
+        `ipcr.localhost:4767/ipns/gitea_admin-<repo>:<tag>`.
       fr_fr: |
         **Remplace quatre applications.** Désinstallez d'abord Radicle, Gitea, Radicle Gitea
         Bridge et IPCR : cette application utilise les mêmes adresses et ports.
@@ -530,8 +551,9 @@ x-casaos:
 
         **Ports.** TCP 8776 (pairs Radicle) et 4768 TCP+UDP (pairs IPFS) sont publiés.
 
-        **Pas encore relié :** les images arrivent automatiquement dans le registre Gitea, mais
-        leur publication sur IPFS reste un `ipcr push` manuel (voir le README d'IPCR).
+        **Les images arrivent sur IPFS d'elles-mêmes.** IPCR suit le registre Gitea de cette
+        application : environ une minute après qu'un build a poussé `gitea_admin/<dépôt>:<tag>`,
+        elle se tire avec `ipcr.localhost:4767/ipns/gitea_admin-<dépôt>:<tag>`.
   index: /
   webui_port: 8080
   store_app_id: ipcr-forge
@@ -580,6 +602,11 @@ x-compose-app:
     - path: /DATA/AppData/$AppID/ipcr/init.d
       user: $PUID
       group: $PGID
+    # Written by bridge-credentials as $PUID, read by ipcr-gateway (root).
+    - path: /DATA/AppData/$AppID/ipcr/secrets
+      user: $PUID
+      group: $PGID
+      mode: "0700"
   files:
     # Each entry and its reason are in the standalone listing it comes from.
     - path: /DATA/AppData/$AppID/radicle/home/config.json
@@ -649,10 +676,12 @@ x-compose-app:
       network: $APP_NET
       volumes:
         - /DATA/AppData/$AppID/bridge/secrets:/secrets
+        - /DATA/AppData/$AppID/ipcr/secrets:/ipcr-secrets
+      # Also mints IPCR's read-only token for following Gitea's registry.
       command:
         - sh
         - -c
-        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" bridge-init
+        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" IPCR_AUTH_FILE=/ipcr-secrets/registry-auth bridge-init
       when: absent:/DATA/AppData/$AppID/bridge/secrets/gitea-token
   webui-host: radicle-${domain}
   webui-path: /

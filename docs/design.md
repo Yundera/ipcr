@@ -66,6 +66,14 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
    rather than `certs.d/ipcr.localhost:4767`.
 7. **Same image → same CID on any node.** Re-publishing `nginxdemos/hello:0.4` from a fresh node
    produced the identical root CID.
+8. **The format is reproducible without containerd.** nerdctl's push is containerd's generic
+   converter (Docker→OCI, platform filter, which *removes* other platforms from the index) plus
+   stargz-snapshotter's hook (`add?cid-version=1&pin=true`, `urls: ipfs://…`). `ipcrd import`
+   mirrors it with the Go standard library, and `nginxdemos/hello:0.4` imported from Docker Hub
+   gets nerdctl's root CID byte for byte.
+9. **Forge handoff: poll, don't push.** CI jobs run in a nested Docker that cannot reach
+   `ipcr.localhost`, so IPCR pulls instead. The watcher polls the registry catalog, the same
+   zero-config shape as the Radicle → Gitea bridge.
 
 ## Open items
 
@@ -77,5 +85,5 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
 - **Storage policy.** Auto-pin keeps every pulled image forever. Unpin images no container uses?
 - **DNSLink** is untested end to end. It goes through the same Kubo `resolve` call as IPNS keys, which is.
 - **Podman**: document and test `/etc/containers/certs.d`.
-- **Publishing UX.** `ipcr push` needs the containerd socket (root-equivalent), so it is an SSH
-  command, not part of the installed app.
+- **Publishing UX.** `ipcr push` needs the containerd socket (root-equivalent). `ipcr import`
+  from a registry does not, and is the preferred path.
