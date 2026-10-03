@@ -85,7 +85,8 @@ CID). It needs no Docker or containerd socket:
 docker exec ipcr-gateway ipcr import docker.io/nginxdemos/hello:0.4 hello:0.4
 ```
 
-Only the host's platform is kept (`IMPORT_PLATFORM=linux/arm64` to choose another).
+Only the host's platform is kept (`IMPORT_PLATFORM=linux/arm64` to choose another, or
+`IMPORT_PLATFORM=all` for a multi-platform image, like `nerdctl push --all-platforms`).
 
 ### Follow a registry
 

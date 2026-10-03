@@ -216,6 +216,7 @@ func pinImage(ctx context.Context, root string) error {
 	n, err := pinDesc(ctx, d)
 	if err == nil {
 		log.Printf("pinned %s (%d objects)", root, n+1)
+		announce(ctx, root) // this node now holds it: say so now, not at the next reprovide
 	}
 	return err
 }

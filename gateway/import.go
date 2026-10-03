@@ -407,7 +407,11 @@ type importer struct {
 
 // platformMatch mirrors containerd's default matcher closely enough for linux images: same OS and
 // architecture, and for arm the same variant (an absent variant matches the default one).
+// IMPORT_PLATFORM=all keeps every entry, like `nerdctl push --all-platforms` (platforms.All).
 func (im *importer) platformMatch(p *ociPlatform) bool {
+	if im.platform.OS == "all" {
+		return true
+	}
 	if p.OS != im.platform.OS || p.Architecture != im.platform.Architecture {
 		return false
 	}
@@ -570,7 +574,21 @@ func importFrom(ctx context.Context, reg *registry, repo, ref string) (string, e
 		sep = "@"
 	}
 	log.Printf("imported %s/%s%s%s → %s (%d objects, %s)", reg.host, repo, sep, ref, root, im.blobs+1, time.Since(start).Round(time.Second))
+	announce(ctx, root)
 	return root, nil
+}
+
+// announce puts a provider record for root in the DHT now. Kubo's own reprovider gets to new
+// content lazily (much later in the lowpower profile), and until then another node's first pull
+// spends minutes finding out who has the root. Only the root is needed: once a peer has found
+// this node for it, bitswap fetches every other block from the same connection.
+func announce(ctx context.Context, root string) {
+	start := time.Now()
+	if err := kuboJSON(ctx, "routing/provide", url.Values{"arg": {root}}, nil); err != nil {
+		log.Printf("announce %s: %v", root, err)
+		return
+	}
+	log.Printf("announced %s (%s)", root, time.Since(start).Round(time.Second))
 }
 
 // ---------------------------------------------------------------- watch

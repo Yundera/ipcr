@@ -1,0 +1,125 @@
+name: ipcr-demo
+
+# IPCR Demo — an app whose image does not come from a registry but from IPFS.
+#
+# The image is traefik/whoami v1.12.0 (amd64, arm64, arm), imported into IPFS by IPCR. Docker
+# pulls it like any other image, through the IPCR app's local address ipcr.localhost:4767, which
+# fetches it from whichever IPFS peers hold it. Nothing else here is special: it is a plain web
+# service. The page answers each visitor with what the server saw of their request.
+#
+# Requires the IPCR app (or IPCR Forge) on the same server: without it, ipcr.localhost:4767 does
+# not answer and the pull fails.
+
+services:
+  ipcr-demo:
+    # Content-addressed twice, so no tag at all: the CID is the IPFS address of the image, and the
+    # sha256 is Docker's own digest of its index. Both name exactly these bytes, forever.
+    image: ipcr.localhost:4767/ipfs/bafkreigu3n3ww2o34efic3kayjpauaq226waewdnwtzgsqueqcdqb2wxhu@sha256:7020e0be98c727ab03c465f603762926a02d11b687ea9533fdfcf0ad187678a0
+    container_name: ipcr-demo
+    # whoami is a single static binary: no shell, no files, nothing to write.
+    user: $PUID:$PGID
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    # Port 8080 rather than the image's default 80, so it runs without root.
+    command: ["--port", "8080", "--name", "ipcr-demo"]
+    environment:
+      TZ: $TZ
+    expose:
+      - 8080
+    labels:
+      caddy_0: ipcr-demo-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy_1: ipcr-demo-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 8080}}"
+      caddy_2: ipcr-demo-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 8080}}"
+    networks:
+      - pcs
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    # No healthcheck: the image is FROM scratch, so there is no binary to run one with.
+
+networks:
+  pcs:
+    name: ${APP_NET:-pcs}
+    external: true
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: ipcr-demo
+  author: Yundera
+  developer: Traefik Labs (whoami), Yundera (IPCR)
+  category: Developer
+  tags: ["developer"]
+  icon: icon.png
+  screenshot_link:
+    - screenshot-1.png
+  title:
+    en_us: IPCR Demo
+  tagline:
+    en_us: A web app installed from IPFS instead of Docker Hub — try IPCR in one click.
+    fr_fr: Une application web installée depuis IPFS plutôt que Docker Hub — essayez IPCR en un clic.
+  description:
+    en_us: |
+      A small demonstration of **IPCR**, the IPFS container registry. This app's image is not
+      downloaded from Docker Hub or any company's registry: it comes from **IPFS**, the
+      peer-to-peer network, by its content address.
+
+      Its compose file says:
+
+      `image: ipcr.localhost:4767/ipfs/bafkreigu3n3w…@sha256:7020e0be…`
+
+      Your server's Docker pulls that like any other image. IPCR fetches it from the servers that
+      already hold it, checks it against its address, and keeps a copy to share with the next one.
+
+      The app itself is **whoami**: a web page that shows what the server saw of your visit
+      (address, browser, request headers). It is a way to see IPCR work, not a tool.
+    fr_fr: |
+      Une petite démonstration d'**IPCR**, le registre de conteneurs sur IPFS. L'image de cette
+      application ne vient ni de Docker Hub ni du registre d'une entreprise : elle vient d'**IPFS**,
+      le réseau pair-à-pair, par son adresse de contenu.
+
+      Son fichier compose indique :
+
+      `image: ipcr.localhost:4767/ipfs/bafkreigu3n3w…@sha256:7020e0be…`
+
+      Le Docker de votre serveur la récupère comme n'importe quelle image. IPCR la télécharge
+      depuis les serveurs qui la possèdent déjà, la vérifie, et en garde une copie à partager.
+
+      L'application elle-même est **whoami** : une page web qui affiche ce que le serveur a vu de
+      votre visite (adresse, navigateur, en-têtes). C'est un moyen de voir IPCR fonctionner, pas un outil.
+  tips:
+    before_install:
+      en_us: |
+        **Install IPCR first** (or IPCR Forge). This app's image is pulled through it; without
+        it, the installation fails.
+
+        The first installation fetches the image from other IPCR servers over IPFS, which can take
+        a little longer than a usual download.
+
+        The page is public: it shows each visitor only what the server saw of their own request.
+      fr_fr: |
+        **Installez d'abord IPCR** (ou IPCR Forge). L'image de cette application passe par lui ;
+        sans lui, l'installation échoue.
+
+        La première installation récupère l'image depuis d'autres serveurs IPCR via IPFS, ce qui
+        peut prendre un peu plus de temps qu'un téléchargement habituel.
+
+        La page est publique : elle ne montre à chaque visiteur que ce que le serveur a vu de sa
+        propre requête.
+  index: /
+  webui_port: 8080
+  store_app_id: ipcr-demo
+
+x-compose-app:
+  webui-host: ipcr-demo-${domain}
+  webui-path: /

@@ -71,6 +71,11 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
    stargz-snapshotter's hook (`add?cid-version=1&pin=true`, `urls: ipfs://…`). `ipcrd import`
    mirrors it with the Go standard library, and `nginxdemos/hello:0.4` imported from Docker Hub
    gets nerdctl's root CID byte for byte.
+10. **Announce new content immediately.** In Kubo's lowpower profile new content reaches the DHT
+    only at the next reprovide, so another node's first pull of a fresh image spent 2 minutes
+    finding the root (whoami: 134 s). `ipcrd` now runs `routing/provide` on the root after every
+    import and pin. The same cold pull then took 8 s. The root is enough: once a peer has found
+    this node, bitswap fetches every other block over the same connection.
 9. **Forge handoff: poll, don't push.** CI jobs run in a nested Docker that cannot reach
    `ipcr.localhost`, so IPCR pulls instead. The watcher polls the registry catalog, the same
    zero-config shape as the Radicle → Gitea bridge.
