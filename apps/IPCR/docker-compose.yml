@@ -1,0 +1,306 @@
+name: ipcr
+
+# IPCR — InterPlanetary Container Registry. Headless: there is no web UI. It gives the host's
+# Docker one fixed registry address, ipcr.localhost:4767, that serves images straight from IPFS:
+#
+#   image: ipcr.localhost:4767/ipfs/<cid>            immutable, by content
+#   image: ipcr.localhost:4767/ipns/<name>:<tag>     mutable, via an IPNS key or a DNSLink domain
+#
+# Nothing here joins the shared network: no service is reached through Caddy. The registry is
+# reached by the host's Docker daemon on loopback, and Kubo by peers on its swarm port.
+
+services:
+  # ── The registry Docker talks to ────────────────────────────────────────────
+  # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
+  # registry below, resolves /ipns/<name>:<tag> itself, and pins every image it serves.
+  ipcr-gateway:
+    image: ghcr.io/yundera/ipcr:0.1.0
+    container_name: ipcr-gateway
+    # Root for one reason: it writes its CA into the host's Docker trust store (the narrow
+    # bind below), which is root-owned. See rationale.md.
+    user: "0:0"
+    # Root needs no capabilities to write root-owned files it owns; drop them all.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["gateway"]
+    environment:
+      TZ: $TZ
+      TLS_DIR: /data/tls
+      # Docker trusts certs.d/<host:port>/ca.crt and re-reads it on every pull.
+      CA_EXPORT: /certs.d/ipcr.localhost:4767/ca.crt
+      # Pin every image this host pulls, so the node keeps — and re-shares — what it runs.
+      AUTO_PIN: "true"
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/tls:/data/tls
+      # The host's Docker trust store, so the CA above can be dropped into it: no daemon
+      # reload, no daemon.json edit. The parent is mounted because Compose cannot create a
+      # bind source whose name contains a colon (ipcr.localhost:4767). ipcrd writes exactly
+      # one file here. See rationale.md.
+      - /etc/docker/certs.d:/certs.d
+    ports:
+      # Loopback only: the client is the host's Docker daemon, which resolves ipcr.localhost
+      # to 127.0.0.1 (RFC 6761). Not reachable from the network, and not a web UI.
+      - "127.0.0.1:4767:4767"
+    depends_on:
+      - ipcr-registry
+    healthcheck:
+      test: ["CMD", "ipcrd", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ipcr-internal
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ── Stock nerdctl IPFS registry ─────────────────────────────────────────────
+  # `nerdctl ipfs registry serve`, unmodified: translates the registry API into IPFS reads.
+  ipcr-registry:
+    image: ghcr.io/yundera/ipcr:0.1.0
+    container_name: ipcr-registry
+    # Root because nerdctl run as any other uid assumes rootless mode and refuses to start
+    # without a rootless containerd — which `ipfs registry serve` never uses. The service has
+    # no volumes and no host access; capabilities are all dropped. See rationale.md.
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["registry"]
+    environment:
+      TZ: $TZ
+    expose:
+      - 5050
+    depends_on:
+      - ipcr-kubo
+    healthcheck:
+      test: ["CMD", "ipcrd", "health", "http://127.0.0.1:5050/v2/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ipcr-internal
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ── Kubo, the IPFS node ─────────────────────────────────────────────────────
+  ipcr-kubo:
+    image: ipfs/kubo:v0.43.1
+    container_name: ipcr-kubo
+    user: $PUID:$PGID
+    restart: unless-stopped
+    # --enable-gc: blocks nobody pinned are collected; pinned images are never touched.
+    command: ["daemon", "--migrate=true", "--agent-version-suffix=docker", "--enable-gc"]
+    environment:
+      TZ: $TZ
+      # Applied at `ipfs init` only: DHT client mode, small connection manager. Tuned for an
+      # always-on small box (see the Kubo store app for measurements).
+      IPFS_PROFILE: lowpower
+      GOMEMLIMIT: 768MiB
+      # Read by seed/init.d/01-ipcr-node.sh on every start.
+      IPCR_SWARM_PORT: "4768"
+      IPFS_STORAGE_MAX: 20GB
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/kubo/:/data/ipfs
+      # Kubo's entrypoint runs every *.sh here before starting the daemon.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/init.d/:/container-init.d:ro
+    expose:
+      # RPC API: no auth, so it never leaves the app's own network.
+      - 5001
+    ports:
+      # libp2p swarm — the peer protocol, not HTTP, so Caddy cannot carry it. Without it the
+      # node still pulls, but nobody can fetch the images this host pins. 4001 is left to the
+      # Kubo store app so both can be installed side by side.
+      - "4768:4768/tcp"
+      - "4768:4768/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "ipfs --api=/ip4/127.0.0.1/tcp/5001 id > /dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - ipcr-internal
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+
+networks:
+  # App-private: the three services reach each other by name, nothing else joins.
+  ipcr-internal:
+    driver: bridge
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: ipcr-gateway
+  author: Yundera
+  developer: Yundera
+  category: Developer
+  tags: ["developer", "needs-public-ip"]
+  icon: icon.png
+  screenshot_link:
+    - screenshot-1.png
+  title:
+    en_us: IPCR
+  tagline:
+    en_us: Pull Docker images straight from IPFS — ipcr.localhost:4767/ipfs/<cid> in any compose file.
+    fr_fr: Tirez vos images Docker directement depuis IPFS — ipcr.localhost:4767/ipfs/<cid> dans n'importe quel compose.
+    es_es: Descarga imágenes Docker directamente desde IPFS — ipcr.localhost:4767/ipfs/<cid> en cualquier compose.
+    zh_cn: 直接从 IPFS 拉取 Docker 镜像 —— 在任意 compose 文件中使用 ipcr.localhost:4767/ipfs/<cid>。
+    ko_kr: IPFS에서 바로 Docker 이미지를 가져오세요 — 어떤 compose 파일에서든 ipcr.localhost:4767/ipfs/<cid>.
+  description:
+    en_us: |
+      IPCR (InterPlanetary Container Registry) lets this server's Docker pull container images from
+      IPFS, the content-addressed peer-to-peer network, using plain `docker pull` and plain compose
+      files — no plugin, no changed tooling.
+
+      An image published to IPFS gets a CID: a name derived from its exact bytes, valid anywhere on
+      the network and impossible to alter without changing the name. IPCR gives Docker one fixed local
+      registry address that resolves those names:
+
+      • `ipcr.localhost:4767/ipfs/<cid>` — an exact, immutable image
+      • `ipcr.localhost:4767/ipns/<name>:<tag>` — a tag its publisher can move, via an IPNS key or a DNSLink domain
+
+      Images are fetched from whichever peers hold them, and every image this server pulls is pinned
+      and shared back to the network, so popular images get faster the more servers run them.
+
+      There is no web interface: you use IPCR by writing these addresses in compose files.
+    fr_fr: |
+      IPCR (InterPlanetary Container Registry) permet au Docker de ce serveur de récupérer des images
+      de conteneurs depuis IPFS, le réseau pair-à-pair adressé par contenu, avec un simple
+      `docker pull` et des fichiers compose ordinaires — sans plugin ni outil modifié.
+
+      Une image publiée sur IPFS reçoit un CID : un nom dérivé de ses octets exacts, valable partout sur
+      le réseau et impossible à altérer sans changer de nom. IPCR donne à Docker une adresse de registre
+      locale fixe qui résout ces noms :
+
+      • `ipcr.localhost:4767/ipfs/<cid>` — une image exacte et immuable
+      • `ipcr.localhost:4767/ipns/<nom>:<tag>` — un tag que son éditeur peut déplacer, via une clé IPNS ou un domaine DNSLink
+
+      Les images sont récupérées auprès des pairs qui les détiennent, et chaque image tirée par ce
+      serveur est épinglée et repartagée au réseau.
+
+      Il n'y a pas d'interface web : on utilise IPCR en écrivant ces adresses dans les fichiers compose.
+    es_es: |
+      IPCR (InterPlanetary Container Registry) permite que el Docker de este servidor descargue imágenes
+      de contenedores desde IPFS, la red entre pares direccionada por contenido, con un simple
+      `docker pull` y archivos compose normales — sin plugins ni herramientas modificadas.
+
+      Una imagen publicada en IPFS recibe un CID: un nombre derivado de sus bytes exactos, válido en
+      toda la red e imposible de alterar sin cambiar de nombre. IPCR da a Docker una dirección de
+      registro local fija que resuelve esos nombres:
+
+      • `ipcr.localhost:4767/ipfs/<cid>` — una imagen exacta e inmutable
+      • `ipcr.localhost:4767/ipns/<nombre>:<tag>` — una etiqueta que su editor puede mover, mediante una clave IPNS o un dominio DNSLink
+
+      Las imágenes se obtienen de los pares que las tienen, y cada imagen que descarga este servidor
+      se fija y se vuelve a compartir con la red.
+
+      No hay interfaz web: IPCR se usa escribiendo estas direcciones en los archivos compose.
+    zh_cn: |
+      IPCR（星际容器镜像仓库）让本服务器的 Docker 能够直接从 IPFS —— 基于内容寻址的点对点网络 ——
+      拉取容器镜像，只需普通的 `docker pull` 和普通的 compose 文件，无需插件，也无需更换工具。
+
+      发布到 IPFS 的镜像会得到一个 CID：由镜像的确切字节计算出的名称，在整个网络中都有效，内容一改
+      名字就变。IPCR 为 Docker 提供一个固定的本地仓库地址来解析这些名称：
+
+      • `ipcr.localhost:4767/ipfs/<cid>` —— 确切且不可变的镜像
+      • `ipcr.localhost:4767/ipns/<名称>:<标签>` —— 发布者可以更新的标签，通过 IPNS 密钥或 DNSLink 域名
+
+      镜像从持有它的节点获取，本服务器拉取的每个镜像都会被固定并回馈共享给网络。
+
+      没有网页界面：在 compose 文件中写入这些地址即可使用 IPCR。
+    ko_kr: |
+      IPCR(InterPlanetary Container Registry)은 이 서버의 Docker가 콘텐츠 주소 기반 P2P 네트워크인
+      IPFS에서 컨테이너 이미지를 가져올 수 있게 해 줍니다. 평범한 `docker pull`과 평범한 compose
+      파일 그대로 — 플러그인도, 바뀐 도구도 필요 없습니다.
+
+      IPFS에 게시된 이미지는 CID를 받습니다. 정확한 바이트에서 만들어진 이름으로, 네트워크 어디서나
+      유효하며 이름을 바꾸지 않고는 내용을 바꿀 수 없습니다. IPCR은 이 이름을 해석하는 고정된 로컬
+      레지스트리 주소를 Docker에 제공합니다:
+
+      • `ipcr.localhost:4767/ipfs/<cid>` — 정확하고 변경 불가능한 이미지
+      • `ipcr.localhost:4767/ipns/<이름>:<태그>` — 게시자가 옮길 수 있는 태그 (IPNS 키 또는 DNSLink 도메인)
+
+      이미지는 이를 보유한 피어에게서 가져오며, 이 서버가 가져온 모든 이미지는 고정되어 네트워크에
+      다시 공유됩니다.
+
+      웹 인터페이스는 없습니다. compose 파일에 이 주소를 적어서 사용합니다.
+  tips:
+    before_install:
+      en_us: |
+        **No web interface.** IPCR is used from compose files. After install, any app can use:
+
+        ```yaml
+        image: ipcr.localhost:4767/ipfs/<cid>
+        image: ipcr.localhost:4767/ipns/<name>:<tag>
+        ```
+
+        **What it changes on the server.** Docker is told to trust this registry by one file,
+        `/etc/docker/certs.d/ipcr.localhost:4767/ca.crt`, written on every start. Nothing else on the
+        host is modified, and Docker is not restarted. The registry listens on `127.0.0.1` only — it is
+        not reachable from the internet.
+
+        **Port 4768 (TCP and UDP) is published** so other peers can fetch the images this server
+        pins. Without a reachable public address IPCR still pulls; it just shares less.
+
+        **Storage.** Every image pulled through IPCR is pinned and kept in
+        `/DATA/AppData/ipcr/kubo/`. Unpinned cache is capped at 20 GB and swept hourly.
+
+        **Publishing an image** is a one-off command over SSH, documented at
+        https://github.com/Yundera/ipcr
+      fr_fr: |
+        **Pas d'interface web.** IPCR s'utilise depuis les fichiers compose. Après installation,
+        n'importe quelle application peut utiliser :
+
+        ```yaml
+        image: ipcr.localhost:4767/ipfs/<cid>
+        image: ipcr.localhost:4767/ipns/<nom>:<tag>
+        ```
+
+        **Ce qui change sur le serveur.** Docker fait confiance à ce registre grâce à un seul fichier,
+        `/etc/docker/certs.d/ipcr.localhost:4767/ca.crt`, écrit à chaque démarrage. Rien d'autre n'est
+        modifié sur l'hôte et Docker n'est pas redémarré. Le registre n'écoute que sur `127.0.0.1` — il
+        n'est pas joignable depuis Internet.
+
+        **Le port 4768 (TCP et UDP) est publié** pour que d'autres pairs puissent récupérer les images
+        épinglées ici. Sans adresse publique joignable, IPCR fonctionne quand même ; il partage moins.
+
+        **Stockage.** Chaque image tirée via IPCR est épinglée et conservée dans
+        `/DATA/AppData/ipcr/kubo/`. Le cache non épinglé est plafonné à 20 Go et purgé toutes les heures.
+
+        **Publier une image** se fait par une commande SSH ponctuelle, documentée sur
+        https://github.com/Yundera/ipcr
+
+x-compose-app:
+  schema_version: 2
+  folders:
+    # Kubo's repo: node identity, IPNS keys, block store, pins. Kubo runs as $PUID:$PGID, so
+    # `ipfs init` needs the directory owned by that pair before first start.
+    - path: /DATA/AppData/$AppID/kubo
+      user: $PUID
+      group: $PGID
+      mode: "0700"
+    - path: /DATA/AppData/$AppID/init.d
+      user: $PUID
+      group: $PGID
+  files:
+    # Declared rather than left to seed/ alone: `mode` keeps the exec bit Kubo's entrypoint
+    # needs, and `ensure: always` makes a store update reach installed nodes.
+    - path: /DATA/AppData/$AppID/init.d/01-ipcr-node.sh
+      from: init.d/01-ipcr-node.sh
+      ensure: always
+      mode: "0755"
+  # Headless: no webui-host, so the tile has no open action.

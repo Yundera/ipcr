@@ -1,0 +1,28 @@
+#!/bin/sh
+# ipcr push <local-image> [<app>[:<tag>]]
+#   Pushes an image from the host's containerd store (Docker 29 = namespace "moby") to IPFS,
+#   pins every blob, and optionally publishes it as /ipns/<key of app>/<tag> (+ latest).
+set -eu
+REG=${REGISTRY_HOST:-ipcr.localhost:4767}
+NS=${CONTAINERD_NAMESPACE:-moby}
+
+case "${1:-}" in
+  push)
+    [ $# -ge 2 ] || { echo "usage: ipcr push <image> [<app>[:<tag>]]" >&2; exit 2; }
+    img=$2
+    cid=$(nerdctl --namespace "$NS" push --ipfs-address "$KUBO_MADDR" "ipfs://$img" | tail -n1)
+    echo "root CID: $cid" >&2
+    ipcrd pin "$cid"
+    echo "pull:     $REG/ipfs/$cid"
+    if [ $# -ge 3 ]; then
+      app=${3%%:*}; tag=latest
+      case "$3" in *:*) tag=${3#*:} ;; esac
+      name=$(ipcrd tag "$app" "$tag" "$cid")
+      [ "$tag" = latest ] || ipcrd tag "$app" latest "$cid" >/dev/null
+      echo "pull:     $REG/ipns/$name:$tag"
+      echo "dnslink:  _dnslink.<your-domain>  TXT  \"dnslink=/ipns/$name\"   → $REG/ipns/<your-domain>:$tag"
+    fi
+    ;;
+  pin|tag|resolve) exec ipcrd "$@" ;;
+  *) echo "usage: ipcr push <image> [<app>[:<tag>]] | pin <cid> | tag <app> <tag> <cid> | resolve <name> [tag]" >&2; exit 2 ;;
+esac

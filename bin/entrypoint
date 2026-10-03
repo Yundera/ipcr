@@ -1,0 +1,19 @@
+#!/bin/sh
+# Roles: gateway | registry | ipcr <args> | anything else is exec'd.
+set -eu
+KUBO_HOST=${KUBO_HOST:-ipcr-kubo}
+
+# nerdctl wants a multiaddr with an IP, not a DNS name
+kubo_maddr() {
+  ip=$(getent hosts "$KUBO_HOST" | awk '{print $1; exit}')
+  [ -n "$ip" ] || { echo "cannot resolve $KUBO_HOST" >&2; exit 1; }
+  echo "/ip4/$ip/tcp/5001"
+}
+export KUBO_API=${KUBO_API:-http://$KUBO_HOST:5001}
+
+case "${1:-gateway}" in
+  gateway)  exec ipcrd serve ;;
+  registry) exec nerdctl ipfs registry serve --listen-registry 0.0.0.0:5050 --ipfs-address "$(kubo_maddr)" ;;
+  ipcr) shift; export KUBO_MADDR="$(kubo_maddr)"; exec ipcr "$@" ;;
+  *) exec "$@" ;;
+esac

@@ -1,0 +1,658 @@
+name: ipcr-forge
+
+# IPCR Forge — the whole decentralised forge in one app:
+#
+#   git push rad main v1.2.3                                  (developer)
+#     → radicle-node / radicle-api        source of truth, peer-to-peer
+#     → radicle-gitea-bridge              copies repos that commit .gitea/workflows/
+#     → gitea + gitea-runner              GitHub-style Actions build the image
+#     → gitea registry                    staging: gitea-<domain>/gitea_admin/<app>:1.2.3
+#     ┄ (not wired yet) package webhook → IPCR import
+#     → ipcr-kubo / ipcr-registry / ipcr-gateway
+#   docker pull ipcr.localhost:4767/ipns/<name>:1.2.3         (anyone)
+#
+# Every service is copied verbatim from its standalone listing (apps/Radicle, apps/Gitea,
+# apps/Radicle-Gitea-Bridge, apps/IPCR), so each keeps its own comments and rationale.md.
+# Only the data folders move, one subfolder per part: $AppID/{radicle,gitea,bridge,ipcr}/.
+#
+# Replaces those four apps; it cannot sit beside them. It uses the same container names,
+# domains (radicle-, radicle-api-, gitea-) and host ports (8776, 4768, 127.0.0.1:4767).
+#
+# The handoff from Gitea's registry to IPFS is the one missing link: the runner's jobs run in
+# a nested Docker that cannot reach ipcr.localhost (it is the *host's* loopback), so the
+# import has to run on IPCR's side, triggered by Gitea's "package published" webhook.
+
+services:
+  # ═══ Radicle — the source of truth ═════════════════════════════════════════════
+  # Verbatim from apps/Radicle; only its data folder moves to $AppID/radicle/.
+
+  # The web UI: the Radicle Explorer bundle served as static files by Caddy.
+  # It is a pure client-side app — every request it makes goes from the visitor's
+  # browser straight to the API below, which is why that one needs its own domain.
+  radicle:
+    image: dirk1980/radicle-explorer-container@sha256:0e31485c38a765e83a10b1a4bf71b12d4f9fec630881d171bba736a4a56a16ce
+    container_name: radicle
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 80
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      TZ: $TZ
+      # Caddy writes its autosaved config and its (unused here) certificate store
+      # under these two paths. The image points them at /config and /data, which are
+      # root-owned, so as $PUID the process cannot create them and refuses to start.
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      XDG_DATA_HOME: /tmp/caddy-data
+    volumes:
+      # Replaces the image's own :80 Caddyfile — see the comments in that file.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    expose:
+      - 8080
+    labels:
+      caddy_0: radicle-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy_1: radicle-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 8080}}"
+      caddy_2: radicle-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 8080}}"
+    networks:
+      - pcs
+
+  # radicle-httpd — the node's read-only JSON API, on its own domain.
+  #
+  # This domain is deliberately NOT behind the SSO gate: the explorer above is a
+  # static bundle running in the visitor's browser, so it is the browser that calls
+  # this API, cross-origin. The daemon serves public repositories only (private ones
+  # are filtered out upstream) and has no write endpoints at all. See rationale.md.
+  radicle-api:
+    image: dirk1980/radicle-httpd@sha256:5e95be30e4bde55b509a65fd56f8b825cafd0f5cd752c1a13e79aad75b958895
+    container_name: radicle-api
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 70
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    command: ["--listen", "0.0.0.0:8080"]
+    environment:
+      TZ: $TZ
+    volumes:
+      # Same Radicle home as the node: the daemon reads the repository storage
+      # directly and talks to the node over the control socket inside it.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/home/:/radicle-home/
+    healthcheck:
+      # curl, not wget: this image carries curl and no busybox.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/v1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    expose:
+      - 8080
+    labels:
+      caddy_0: radicle-api-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy_1: radicle-api-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 8080}}"
+      caddy_2: radicle-api-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 8080}}"
+    networks:
+      - pcs
+
+  # The node itself: speaks the Radicle peer-to-peer protocol (gossip, fetch,
+  # announce) on TCP 8776. No HTTP, so no Caddy route and no place on the shared
+  # network — it only needs egress, which the app-internal bridge provides.
+  radicle-node:
+    image: dirk1980/radicle-seed-node@sha256:78ccee526ad4b4f4d7c79c2323b032a7209858a48e1dc9c077272ff1660050e2
+    container_name: radicle-node
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      TZ: $TZ
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/home/:/radicle-home/
+    ports:
+      # Radicle peer-to-peer protocol. Other nodes dial in here to fetch the
+      # repositories this node seeds; without it the node still syncs outbound,
+      # but nobody can fetch from it. Hence the needs-public-ip tag.
+      - "8776:8776"
+    healthcheck:
+      # `rad node status` round-trips the node's control socket, which is the only
+      # liveness signal this container has — but it also renders the peer table, and
+      # that takes 3-8s on an idle node and longer while the node is syncing. Hence
+      # the unusually generous timeout: a 10s one fails during the first sync and
+      # flaps the container between healthy and unhealthy.
+      test: ["CMD", "rad", "node", "status"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 90s
+    networks:
+      - radicle-internal
+
+  # ═══ Gitea — CI and the staging registry ═══════════════════════════════════════
+  # Verbatim from apps/Gitea; only its data folder moves to $AppID/gitea/.
+
+  # Gitea itself — git hosting, the Actions controller, and the OCI package
+  # registry, all in one process. SQLite: a personal forge never has the write
+  # concurrency that would justify a second container for Postgres.
+  gitea:
+    image: gitea/gitea:1.27.3-rootless
+    container_name: gitea
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 70
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      TZ: $TZ
+      # Every URL Gitea hands out — clone URLs, the registry host, and the
+      # server_url the CI runner passes to jobs — is derived from ROOT_URL, so
+      # it has to be the address that works from outside as well as inside.
+      GITEA__server__ROOT_URL: https://gitea-${APP_DOMAIN}/
+      GITEA__server__DOMAIN: gitea-${APP_DOMAIN}
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__PROTOCOL: http
+      # The address Gitea's own CLI uses to reach the running server's internal
+      # API. It defaults to localhost, which is right for the server itself and
+      # useless from the init container that runs
+      # `gitea actions generate-runner-token`. It has to be set here rather than
+      # there: the CLI reads it out of the shared app.ini, and only this
+      # container's entrypoint renders environment into app.ini.
+      GITEA__server__LOCAL_ROOT_URL: http://gitea:3000/
+      # Git over SSH would need a published host port of its own. Everything
+      # here — clone, push, CI, registry — goes over HTTPS instead.
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__server__START_SSH_SERVER: "false"
+      # Skips the first-run install wizard: every value it would ask for is set
+      # here, and the admin account is created by an init step below.
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__database__PATH: /var/lib/gitea/data/gitea.db
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "true"
+      GITEA__actions__ENABLED: "true"
+      # Where a bare `uses: actions/checkout@v4` is resolved from.
+      GITEA__actions__DEFAULT_ACTIONS_URL: github
+      GITEA__packages__ENABLED: "true"
+      # Lets a pull mirror name a repository on this server's own Docker
+      # network — a Radicle node's git endpoint, for instance. See rationale.md.
+      GITEA__migrations__ALLOW_LOCALNETWORKS: "true"
+      # How often a pull mirror is re-fetched. The sync emits the same push
+      # event a real push would, so this interval is also how quickly CI
+      # reacts to a commit that arrives from the mirrored source.
+      GITEA__mirror__DEFAULT_INTERVAL: 10m
+      GITEA__mirror__MIN_INTERVAL: 10m
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/data:/var/lib/gitea
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/config:/etc/gitea
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    expose:
+      - 3000
+    labels:
+      caddy_0: gitea-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 3000}}"
+      caddy_1: gitea-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 3000}}"
+      caddy_2: gitea-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 3000}}"
+    networks:
+      - pcs
+      - gitea-internal
+
+  # The CI runner: act_runner with its own Docker daemon inside it (dind), so
+  # workflow jobs and the images they build never touch the host's daemon.
+  # See rationale.md for what `privileged` buys and what it costs.
+  gitea-runner:
+    image: gitea/act_runner:0.6.1-dind
+    container_name: gitea-runner
+    restart: unless-stopped
+    privileged: true
+    cpu_shares: 20
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    environment:
+      TZ: $TZ
+      # This address is not just how the runner daemon reaches Gitea — it is
+      # handed to every job as GITHUB_SERVER_URL, and a job runs inside the
+      # runner's *nested* daemon, on a network where `gitea` does not resolve.
+      # So it has to be an address that works from the outside: checkout and
+      # `docker login` from a workflow both go out and back over HTTPS.
+      GITEA_INSTANCE_URL: https://gitea-${APP_DOMAIN}
+      GITEA_RUNNER_REGISTRATION_TOKEN_FILE: /data/token
+      GITEA_RUNNER_NAME: gitea-runner
+      # Registration-time labels. runner-config/config.yaml repeats them, and
+      # that copy wins on every start, so an installed runner follows store updates.
+      GITEA_RUNNER_LABELS: ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest,ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04,ubuntu-22.04:docker://docker.gitea.com/runner-images:ubuntu-22.04,docker:docker://docker:28.5-cli
+      CONFIG_FILE: /config/config.yaml
+      # DOCKER_TLS_CERTDIR is deliberately left at the image's default. Emptying
+      # it does not turn the nested daemon's TCP listener off — it turns the
+      # listener's TLS off, and 2375 then answers unauthenticated to anything
+      # that can reach this container.
+    volumes:
+      # .runner (the registration this runner is identified by) and the
+      # registration token the init step leaves for it.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/runner:/data
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/runner-config:/config:ro
+      # Replaces the image's own start-up wait — see the comments in the
+      # script. It is declared under x-compose-app.files rather than left to
+      # the seed tree, because it has to arrive executable.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/runner-config/act_runner-run:/etc/s6/act_runner/run:ro
+      # The inner daemon's image store. Without this every restart re-pulls
+      # every base image a workflow uses.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/runner-docker:/var/lib/docker
+    networks:
+      - gitea-internal
+
+  # ═══ Radicle → Gitea bridge ════════════════════════════════════════════════════
+  # Verbatim from apps/Radicle-Gitea-Bridge; only its data folder moves to $AppID/bridge/.
+
+  radicle-gitea-bridge:
+    image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
+    container_name: radicle-gitea-bridge
+    user: $PUID:$PGID
+    # Reads two HTTP APIs and runs git. Needs no capability at all.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["bridge"]
+    cpu_shares: 20
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      TZ: $TZ
+      # git wants a home; the image's is root's and this runs as $PUID.
+      HOME: /tmp
+      RAD_API: http://radicle-api:8080
+      GITEA_URL: http://gitea:3000
+      # The Gitea account that owns the copies — the one the Gitea app creates.
+      GITEA_OWNER: gitea_admin
+      GITEA_TOKEN_FILE: /secrets/gitea-token
+      # A repository opts in by containing this path at its head.
+      OPT_IN_PATH: .gitea/workflows
+      # Seconds between passes. Releases are not latency-sensitive.
+      INTERVAL: "30"
+    volumes:
+      # One bare repository per Radicle repository: a staging copy between fetch and
+      # push, so a push only sends what changed. Disposable: rebuilt if deleted.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/bridge/cache:/cache
+      # The Gitea token the init step mints. Read-only here.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/bridge/secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /secrets/gitea-token && curl -fsS -o /dev/null http://radicle-api:8080/api/v1 && curl -fsS -o /dev/null http://gitea:3000/api/healthz"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pcs
+
+  # ═══ IPCR — the IPFS container registry ════════════════════════════════════════
+  # Verbatim from apps/IPCR; only its data folder moves to $AppID/ipcr/.
+
+  # ── The registry Docker talks to ────────────────────────────────────────────
+  # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
+  # registry below, resolves /ipns/<name>:<tag> itself, and pins every image it serves.
+  ipcr-gateway:
+    image: ghcr.io/yundera/ipcr:0.1.0
+    container_name: ipcr-gateway
+    # Root for one reason: it writes its CA into the host's Docker trust store (the narrow
+    # bind below), which is root-owned. See rationale.md.
+    user: "0:0"
+    # Root needs no capabilities to write root-owned files it owns; drop them all.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["gateway"]
+    environment:
+      TZ: $TZ
+      TLS_DIR: /data/tls
+      # Docker trusts certs.d/<host:port>/ca.crt and re-reads it on every pull.
+      CA_EXPORT: /certs.d/ipcr.localhost:4767/ca.crt
+      # Pin every image this host pulls, so the node keeps — and re-shares — what it runs.
+      AUTO_PIN: "true"
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/tls:/data/tls
+      # The host's Docker trust store, so the CA above can be dropped into it: no daemon
+      # reload, no daemon.json edit. The parent is mounted because Compose cannot create a
+      # bind source whose name contains a colon (ipcr.localhost:4767). ipcrd writes exactly
+      # one file here. See rationale.md.
+      - /etc/docker/certs.d:/certs.d
+    ports:
+      # Loopback only: the client is the host's Docker daemon, which resolves ipcr.localhost
+      # to 127.0.0.1 (RFC 6761). Not reachable from the network, and not a web UI.
+      - "127.0.0.1:4767:4767"
+    depends_on:
+      - ipcr-registry
+    healthcheck:
+      test: ["CMD", "ipcrd", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ipcr-internal
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ── Stock nerdctl IPFS registry ─────────────────────────────────────────────
+  # `nerdctl ipfs registry serve`, unmodified: translates the registry API into IPFS reads.
+  ipcr-registry:
+    image: ghcr.io/yundera/ipcr:0.1.0
+    container_name: ipcr-registry
+    # Root because nerdctl run as any other uid assumes rootless mode and refuses to start
+    # without a rootless containerd — which `ipfs registry serve` never uses. The service has
+    # no volumes and no host access; capabilities are all dropped. See rationale.md.
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["registry"]
+    environment:
+      TZ: $TZ
+    expose:
+      - 5050
+    depends_on:
+      - ipcr-kubo
+    healthcheck:
+      test: ["CMD", "ipcrd", "health", "http://127.0.0.1:5050/v2/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ipcr-internal
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ── Kubo, the IPFS node ─────────────────────────────────────────────────────
+  ipcr-kubo:
+    image: ipfs/kubo:v0.43.1
+    container_name: ipcr-kubo
+    user: $PUID:$PGID
+    restart: unless-stopped
+    # --enable-gc: blocks nobody pinned are collected; pinned images are never touched.
+    command: ["daemon", "--migrate=true", "--agent-version-suffix=docker", "--enable-gc"]
+    environment:
+      TZ: $TZ
+      # Applied at `ipfs init` only: DHT client mode, small connection manager. Tuned for an
+      # always-on small box (see the Kubo store app for measurements).
+      IPFS_PROFILE: lowpower
+      GOMEMLIMIT: 768MiB
+      # Read by seed/init.d/01-ipcr-node.sh on every start.
+      IPCR_SWARM_PORT: "4768"
+      IPFS_STORAGE_MAX: 20GB
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/kubo/:/data/ipfs
+      # Kubo's entrypoint runs every *.sh here before starting the daemon.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/init.d/:/container-init.d:ro
+    expose:
+      # RPC API: no auth, so it never leaves the app's own network.
+      - 5001
+    ports:
+      # libp2p swarm — the peer protocol, not HTTP, so Caddy cannot carry it. Without it the
+      # node still pulls, but nobody can fetch the images this host pins. 4001 is left to the
+      # Kubo store app so both can be installed side by side.
+      - "4768:4768/tcp"
+      - "4768:4768/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "ipfs --api=/ip4/127.0.0.1/tcp/5001 id > /dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - ipcr-internal
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+
+networks:
+  pcs:
+    name: ${APP_NET:-pcs}
+    external: true
+  # From apps/Radicle: egress only, for the node.
+  radicle-internal:
+    driver: bridge
+  # From apps/Gitea: gitea ↔ runner, nothing else.
+  gitea-internal:
+    driver: bridge
+  # From apps/IPCR: gateway ↔ registry ↔ kubo, nothing else.
+  ipcr-internal:
+    driver: bridge
+
+x-casaos:
+  architectures:
+    - amd64
+  main: radicle
+  author: Yundera
+  developer: Yundera
+  category: Developer
+  tags: ["developer", "git", "ci", "needs-public-ip"]
+  icon: icon.png
+  title:
+    en_us: IPCR Forge
+  tagline:
+    en_us: A decentralised forge in one install — Radicle, Gitea Actions and IPFS images.
+    fr_fr: Une forge décentralisée en une installation — Radicle, Gitea Actions et images IPFS.
+  description:
+    en_us: |
+      IPCR Forge is the full path from code to running container, without a central service:
+
+      • **Radicle** holds your repositories on a peer-to-peer network. You push with `git push rad`.
+      • **Gitea Actions** builds them with GitHub-style workflows, triggered by a release tag.
+      • **IPCR** serves the resulting images from IPFS, so anyone can `docker pull` them by name.
+
+      A repository joins the pipeline by committing a workflow under `.gitea/workflows/`: there
+      is nothing to configure per project.
+
+      This app bundles the Radicle, Gitea, Radicle Gitea Bridge and IPCR apps. Install it instead
+      of them, not beside them.
+    fr_fr: |
+      IPCR Forge couvre tout le chemin du code au conteneur en production, sans service central :
+
+      • **Radicle** garde vos dépôts sur un réseau pair-à-pair. Vous poussez avec `git push rad`.
+      • **Gitea Actions** les construit avec des workflows au format GitHub, déclenchés par un tag.
+      • **IPCR** sert les images produites depuis IPFS : n'importe qui peut les `docker pull`.
+
+      Un dépôt rejoint la chaîne en ajoutant un workflow sous `.gitea/workflows/` : rien à
+      configurer par projet.
+
+      Cette application regroupe les applications Radicle, Gitea, Radicle Gitea Bridge et IPCR.
+      Installez-la à leur place, pas à côté.
+  tips:
+    before_install:
+      en_us: |
+        **Replaces four apps.** Uninstall Radicle, Gitea, Radicle Gitea Bridge and IPCR first:
+        this app uses the same addresses and ports.
+
+        | Address | What |
+        | --- | --- |
+        | `https://radicle-$APP_DOMAIN` | Radicle explorer (public) |
+        | `https://radicle-api-$APP_DOMAIN` | Radicle API and read-only git (public) |
+        | `https://gitea-$APP_DOMAIN` | Gitea: builds, logs, staging registry (`gitea_admin`) |
+        | `ipcr.localhost:4767` | IPCR registry, this server's Docker only |
+
+        **Ports.** TCP 8776 (Radicle peers) and 4768 TCP+UDP (IPFS peers) are published.
+
+        **Not wired yet:** images reach Gitea's registry automatically, but publishing them to
+        IPFS is still a manual `ipcr push` (see the IPCR README).
+      fr_fr: |
+        **Remplace quatre applications.** Désinstallez d'abord Radicle, Gitea, Radicle Gitea
+        Bridge et IPCR : cette application utilise les mêmes adresses et ports.
+
+        | Adresse | Quoi |
+        | --- | --- |
+        | `https://radicle-$APP_DOMAIN` | Explorateur Radicle (public) |
+        | `https://radicle-api-$APP_DOMAIN` | API Radicle et git en lecture seule (public) |
+        | `https://gitea-$APP_DOMAIN` | Gitea : builds, journaux, registre de transit (`gitea_admin`) |
+        | `ipcr.localhost:4767` | Registre IPCR, pour le Docker de ce serveur uniquement |
+
+        **Ports.** TCP 8776 (pairs Radicle) et 4768 TCP+UDP (pairs IPFS) sont publiés.
+
+        **Pas encore relié :** les images arrivent automatiquement dans le registre Gitea, mais
+        leur publication sur IPFS reste un `ipcr push` manuel (voir le README d'IPCR).
+  index: /
+  webui_port: 8080
+  store_app_id: ipcr-forge
+
+x-compose-app:
+  schema_version: 2
+  folders:
+    # ── Radicle ──
+    - path: /DATA/AppData/$AppID/radicle/home
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/radicle/caddy
+      user: $PUID
+      group: $PGID
+    # ── Gitea ──
+    - path: /DATA/AppData/$AppID/gitea/data
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/gitea/config
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/gitea/runner
+      user: $PUID
+      group: $PGID
+      mode: "0700"
+    - path: /DATA/AppData/$AppID/gitea/runner-config
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/gitea/runner-docker
+      user: $PUID
+      group: $PGID
+      mode: "0710"
+    # ── Bridge ──
+    - path: /DATA/AppData/$AppID/bridge/cache
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/bridge/secrets
+      user: $PUID
+      group: $PGID
+      mode: "0700"
+    # ── IPCR ──
+    - path: /DATA/AppData/$AppID/ipcr/kubo
+      user: $PUID
+      group: $PGID
+      mode: "0700"
+    - path: /DATA/AppData/$AppID/ipcr/init.d
+      user: $PUID
+      group: $PGID
+  files:
+    # Each entry and its reason are in the standalone listing it comes from.
+    - path: /DATA/AppData/$AppID/radicle/home/config.json
+      from: radicle/home/config.json.tmpl
+      ensure: always
+      mode: "0644"
+    - path: /DATA/AppData/$AppID/radicle/caddy/Caddyfile
+      from: radicle/caddy/Caddyfile.tmpl
+      ensure: always
+      mode: "0644"
+    - path: /DATA/AppData/$AppID/gitea/runner-config/act_runner-run
+      from: gitea/runner-config/act_runner-run
+      ensure: always
+      mode: "0755"
+    - path: /DATA/AppData/$AppID/ipcr/init.d/01-ipcr-node.sh
+      from: ipcr/init.d/01-ipcr-node.sh
+      ensure: always
+      mode: "0755"
+  init:
+    # In order: Radicle's identity before its node starts, then Gitea's admin, then the
+    # runner token and the bridge's credentials, which both need that admin to exist.
+    - name: radicle-identity
+      image: dirk1980/radicle-seed-node@sha256:78ccee526ad4b4f4d7c79c2323b032a7209858a48e1dc9c077272ff1660050e2
+      user: $PUID:$PGID
+      volumes:
+        - /DATA/AppData/$AppID/radicle/home:/radicle-home
+      command: ["sh", "-c", "yes '' | rad auth --alias radicle-${APP_PUBLIC_IP_DASH} --stdin"]
+      when: absent:/DATA/AppData/$AppID/radicle/home/keys/radicle
+    - name: gitea-admin
+      image: gitea/gitea:1.27.3-rootless
+      user: $PUID:$PGID
+      phase: post_up
+      volumes:
+        - /DATA/AppData/$AppID/gitea/data:/var/lib/gitea
+        - /DATA/AppData/$AppID/gitea/config:/etc/gitea
+      command:
+        - sh
+        - -c
+        - |
+          timeout 240 sh -c 'until gitea admin user list >/dev/null 2>&1; do sleep 3; done'
+          gitea admin user create --admin --username gitea_admin \
+            --password "$APP_DEFAULT_PASSWORD" --email "$APP_EMAIL" \
+            --must-change-password=false \
+            || echo "admin account already present, leaving it alone"
+      when: always
+    - name: gitea-runner-token
+      image: gitea/gitea:1.27.3-rootless
+      user: $PUID:$PGID
+      phase: post_up
+      network: $APP_NET
+      volumes:
+        - /DATA/AppData/$AppID/gitea/data:/var/lib/gitea
+        - /DATA/AppData/$AppID/gitea/config:/etc/gitea
+        - /DATA/AppData/$AppID/gitea/runner:/runner
+      command:
+        - sh
+        - -c
+        - |
+          timeout 240 sh -c 'until gitea actions generate-runner-token > /runner/token.new 2>/dev/null; do sleep 3; done'
+          mv /runner/token.new /runner/token
+          chmod 600 /runner/token
+      when: absent:/DATA/AppData/$AppID/gitea/runner/.runner
+    - name: bridge-credentials
+      image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
+      user: $PUID:$PGID
+      phase: post_up
+      network: $APP_NET
+      volumes:
+        - /DATA/AppData/$AppID/bridge/secrets:/secrets
+      command:
+        - sh
+        - -c
+        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" bridge-init
+      when: absent:/DATA/AppData/$AppID/bridge/secrets/gitea-token
+  webui-host: radicle-${domain}
+  webui-path: /

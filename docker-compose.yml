@@ -1,0 +1,54 @@
+# Development stack: builds the image from this checkout. The store app lives in apps/IPCR/.
+#   docker compose up -d --build
+#   docker compose run --rm cli ipcr push <image> [<app>[:<tag>]]
+name: ipcr-dev
+
+x-app: &app
+  build: .
+  image: ipcr:dev
+  restart: unless-stopped
+  networks: [ipcr-internal]
+
+services:
+  ipcr-kubo:
+    image: ipfs/kubo:v0.43.1
+    restart: unless-stopped
+    command: ["daemon", "--migrate=true", "--enable-gc"]
+    environment:
+      IPFS_PROFILE: lowpower
+    volumes:
+      - ./data/kubo:/data/ipfs
+      - ./apps/IPCR/seed/init.d:/container-init.d:ro   # same node config as the store app
+    ports:
+      - "4768:4768/tcp"           # swarm; 4001 is left to the Kubo store app
+      - "4768:4768/udp"
+    networks: [ipcr-internal]
+
+  ipcr-registry:                  # stock nerdctl IPFS registry, untouched
+    <<: *app
+    command: ["registry"]
+    depends_on: [ipcr-kubo]
+
+  ipcr-gateway:                   # ipcrd: /ipfs passthrough + /ipns tags + auto-pin + TLS
+    <<: *app
+    command: ["gateway"]
+    user: "0:0"                   # writes the CA into the host's certs.d
+    environment:
+      TLS_DIR: /data/tls
+      CA_EXPORT: /certs.d/ipcr.localhost:4767/ca.crt
+    volumes:
+      - ./data/tls:/data/tls
+      - /etc/docker/certs.d:/certs.d
+    ports:
+      - "127.0.0.1:4767:4767"
+    depends_on: [ipcr-kubo, ipcr-registry]
+
+  cli:
+    <<: *app
+    restart: "no"
+    profiles: [cli]
+    volumes:
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock
+
+networks:
+  ipcr-internal:

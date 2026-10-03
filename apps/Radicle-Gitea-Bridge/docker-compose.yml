@@ -1,0 +1,172 @@
+name: radicle-gitea-bridge
+
+# Radicle → Gitea bridge. Headless: no web UI. Copies every Radicle repository that
+# commits a Gitea workflow into Gitea with a real `git push`, so Gitea Actions builds it.
+#
+# Needs the Radicle and Gitea apps on the same server: it reaches both by name on the
+# shared network (radicle-api:8080, gitea:3000), never through Caddy. Source of the
+# image: github.com/worph/radicle-gitea-bridge. See rationale.md.
+
+services:
+  radicle-gitea-bridge:
+    image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
+    container_name: radicle-gitea-bridge
+    user: $PUID:$PGID
+    # Reads two HTTP APIs and runs git. Needs no capability at all.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["bridge"]
+    cpu_shares: 20
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      TZ: $TZ
+      # git wants a home; the image's is root's and this runs as $PUID.
+      HOME: /tmp
+      RAD_API: http://radicle-api:8080
+      GITEA_URL: http://gitea:3000
+      # The Gitea account that owns the copies — the one the Gitea app creates.
+      GITEA_OWNER: gitea_admin
+      GITEA_TOKEN_FILE: /secrets/gitea-token
+      # A repository opts in by containing this path at its head.
+      OPT_IN_PATH: .gitea/workflows
+      # Seconds between passes. Releases are not latency-sensitive.
+      INTERVAL: "30"
+    volumes:
+      # One bare repository per Radicle repository: a staging copy between fetch and
+      # push, so a push only sends what changed. Disposable: rebuilt if deleted.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/cache:/cache
+      # The Gitea token the init step mints. Read-only here.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /secrets/gitea-token && curl -fsS -o /dev/null http://radicle-api:8080/api/v1 && curl -fsS -o /dev/null http://gitea:3000/api/healthz"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pcs
+
+networks:
+  pcs:
+    name: ${APP_NET:-pcs}
+    external: true
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: radicle-gitea-bridge
+  author: Yundera
+  developer: Yundera
+  category: Developer
+  tags: ["developer", "git", "ci"]
+  title:
+    en_us: Radicle Gitea Bridge
+  tagline:
+    en_us: Push to Radicle, build with Gitea Actions — CI for your peer-to-peer repositories.
+    fr_fr: Poussez sur Radicle, construisez avec Gitea Actions — de la CI pour vos dépôts pair-à-pair.
+  description:
+    en_us: |
+      Radicle keeps your code on a peer-to-peer network; Gitea has a CI engine that runs
+      GitHub-style workflows and a container registry. This app connects the two, so a
+      `git push rad` — of a branch or a release tag — starts a Gitea Actions build.
+
+      • No per-project setup: a Radicle repository opts in by committing a workflow under
+        `.gitea/workflows/`. The bridge notices it within a minute.
+      • The Gitea copy is created for you, with issues, pull requests and the wiki switched
+        off — Radicle stays the one place people push and discuss.
+      • Release tags signed in Radicle become ordinary git tags in Gitea, and a tag is never
+        moved once built, so a version always means the same code.
+      • Workflows can push images to Gitea's registry with the `REGISTRY_TOKEN` secret, set up
+        for every copied repository.
+
+      There is no web interface: builds appear in Gitea, under each repository's Actions tab.
+    fr_fr: |
+      Radicle garde votre code sur un réseau pair-à-pair ; Gitea a un moteur d'intégration
+      continue qui exécute des workflows au format GitHub, et un registre de conteneurs. Cette
+      application relie les deux : un `git push rad` — d'une branche ou d'un tag de version —
+      déclenche un build Gitea Actions.
+
+      • Aucune configuration par projet : un dépôt Radicle s'inscrit en ajoutant un workflow sous
+        `.gitea/workflows/`. Le pont le détecte en moins d'une minute.
+      • La copie Gitea est créée pour vous, sans tickets, pull requests ni wiki — Radicle reste le
+        seul endroit où l'on pousse et où l'on discute.
+      • Les tags de version signés dans Radicle deviennent des tags git ordinaires dans Gitea, et
+        un tag déjà construit n'est jamais déplacé.
+      • Les workflows peuvent publier des images dans le registre Gitea avec le secret
+        `REGISTRY_TOKEN`, configuré pour chaque dépôt copié.
+
+      Pas d'interface web : les builds apparaissent dans Gitea, onglet Actions de chaque dépôt.
+  tips:
+    before_install:
+      en_us: |
+        **Requires the Radicle and Gitea apps** on this server. Install them first.
+
+        **Opting a repository in.** Seed it on the Radicle node, then commit a workflow:
+
+        ```yaml
+        # .gitea/workflows/build.yml
+        on:
+          push:
+            tags: ['v*']
+        ```
+
+        and `git push rad main v1.0.0`. The Gitea copy appears as `gitea_admin/<name>`.
+
+        **Credentials.** On install, the app signs in to Gitea once as `gitea_admin` with your
+        server's default app password and creates two narrow tokens: one for itself (push and
+        create repositories), one stored as the `REGISTRY_TOKEN` Actions secret (push images).
+        Only Radicle's public repositories are visible to it.
+      fr_fr: |
+        **Nécessite les applications Radicle et Gitea** sur ce serveur. Installez-les d'abord.
+
+        **Inscrire un dépôt.** Suivez-le (seed) sur le nœud Radicle, puis committez un workflow :
+
+        ```yaml
+        # .gitea/workflows/build.yml
+        on:
+          push:
+            tags: ['v*']
+        ```
+
+        et `git push rad main v1.0.0`. La copie Gitea apparaît sous `gitea_admin/<nom>`.
+
+        **Identifiants.** À l'installation, l'application se connecte une fois à Gitea en tant que
+        `gitea_admin` avec le mot de passe par défaut de vos applications et crée deux jetons
+        restreints : l'un pour elle-même (pousser et créer des dépôts), l'autre enregistré comme
+        secret Actions `REGISTRY_TOKEN` (publier des images). Seuls les dépôts publics de Radicle
+        lui sont visibles.
+
+x-compose-app:
+  schema_version: 2
+  folders:
+    - path: /DATA/AppData/$AppID/cache
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/secrets
+      user: $PUID
+      group: $PGID
+      mode: "0700"
+  init:
+    # Mints the bridge's Gitea token and the REGISTRY_TOKEN Actions secret. The
+    # password is the one the Gitea app's own create-admin step sets; it is used once,
+    # here, and never stored. post_up and on the shared network: it calls Gitea's API.
+    - name: gitea-credentials
+      image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
+      user: $PUID:$PGID
+      phase: post_up
+      network: $APP_NET
+      volumes:
+        - /DATA/AppData/$AppID/secrets:/secrets
+      command:
+        - sh
+        - -c
+        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" bridge-init
+      # Once. Re-minting on every start would replace a working token for nothing;
+      # delete secrets/gitea-token to force a new one.
+      when: absent:/DATA/AppData/$AppID/secrets/gitea-token
+  # Headless: no webui-host, so the tile has no open action.
