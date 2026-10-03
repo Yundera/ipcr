@@ -590,16 +590,24 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 	if b, err := os.ReadFile(statePath); err == nil {
 		_ = json.Unmarshal(b, &state)
 	}
-	save := func() {
-		b, _ := json.MarshalIndent(state, "", "  ")
-		if err := os.MkdirAll(stateDir, 0o755); err == nil {
-			err = os.WriteFile(statePath+".tmp", b, 0o644)
-			if err == nil {
-				err = os.Rename(statePath+".tmp", statePath)
-			}
-			if err != nil {
-				log.Printf("watch: save state: %v", err)
-			}
+	// published.json is the public view of the same thing — what to write in an `image:` line —
+	// for a UI to read (the forge's landing page serves it as /images.json).
+	pubPath := filepath.Join(stateDir, "published.json")
+	pub := published{Images: map[string]*publishedRepo{}}
+	if b, err := os.ReadFile(pubPath); err == nil {
+		_ = json.Unmarshal(b, &pub)
+	}
+	write := func(path string, v any) {
+		b, _ := json.MarshalIndent(v, "", "  ")
+		err := os.MkdirAll(stateDir, 0o755)
+		if err == nil {
+			err = os.WriteFile(path+".tmp", b, 0o644)
+		}
+		if err == nil {
+			err = os.Rename(path+".tmp", path)
+		}
+		if err != nil {
+			log.Printf("watch: save %s: %v", filepath.Base(path), err)
 		}
 	}
 	log.Printf("watch: %s every %s", registryURL, every)
@@ -626,7 +634,7 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 					continue
 				}
 				key := repo + ":" + tag
-				if state[key] == dgst {
+				if state[key] == dgst && pub.has(repo, tag) {
 					continue
 				}
 				root, err := importFrom(ctx, reg, repo, dgst)
@@ -635,6 +643,8 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 					name, err = tagImage(ctx, strings.ReplaceAll(repo, "/", "-"), tag, root)
 					if err == nil {
 						log.Printf("watch: %s:%s → ipcr.localhost:4767/ipns/%s:%s (/ipfs/%s)", repo, tag, name, tag, root)
+						pub.set(repo, name, tag, publishedTag{CID: root, Digest: dgst, At: time.Now().UTC().Format(time.RFC3339)})
+						write(pubPath, &pub)
 					}
 				}
 				if err != nil {
@@ -642,7 +652,7 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 					continue
 				}
 				state[key] = dgst
-				save()
+				write(statePath, state)
 			}
 		}
 		select {
@@ -651,4 +661,40 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 		case <-time.After(every):
 		}
 	}
+}
+
+type publishedTag struct {
+	CID    string `json:"cid"`
+	Digest string `json:"digest"`
+	At     string `json:"at"`
+}
+
+type publishedRepo struct {
+	IPNS string                  `json:"ipns"`
+	Tags map[string]publishedTag `json:"tags"`
+}
+
+type published struct {
+	Registry string                    `json:"registry"`
+	Images   map[string]*publishedRepo `json:"images"`
+}
+
+func (p *published) has(repo, tag string) bool {
+	r := p.Images[repo]
+	if r == nil {
+		return false
+	}
+	_, ok := r.Tags[tag]
+	return ok
+}
+
+func (p *published) set(repo, ipns, tag string, t publishedTag) {
+	p.Registry = "ipcr.localhost:4767"
+	r := p.Images[repo]
+	if r == nil {
+		r = &publishedRepo{Tags: map[string]publishedTag{}}
+		p.Images[repo] = r
+	}
+	r.IPNS = ipns
+	r.Tags[tag] = t
 }

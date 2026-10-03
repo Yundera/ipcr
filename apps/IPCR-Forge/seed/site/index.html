@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPCR Forge</title>
+<link rel="icon" href="icon.png">
+<!--
+  Plain file, deliberately not a Maison .tmpl: it contains no dollar-brace sequence, and every
+  address is derived in the browser from this page's own hostname (ipcr-forge-<domain> →
+  radicle-<domain>, gitea-<domain>), so the nip.io / sslip.io aliases work too.
+  Live data: /images.json (IPCR's published.json) and the Radicle API's node info.
+-->
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --ink: #0f172a; --muted: #5b6475; --line: #e3e7ee;
+    --accent: #0f766e; --accent-2: #1e3a8a; --code: #f1f4f8; --ok: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b1220; --card: #111a2c; --ink: #e5e9f0; --muted: #94a0b5; --line: #1f2a40;
+      --accent: #2dd4bf; --accent-2: #93c5fd; --code: #0d1626; --ok: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; gap: 18px; align-items: center; margin-bottom: 8px; }
+  header img { width: 64px; height: 64px; }
+  h1 { font-size: 30px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 21px; margin: 40px 0 12px; }
+  h3 { font-size: 16px; margin: 20px 0 6px; }
+  p { margin: 8px 0; }
+  .lede { color: var(--muted); font-size: 18px; margin: 4px 0 24px; }
+  a { color: var(--accent); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+    text-decoration: none; color: inherit; display: block; }
+  a.card:hover { border-color: var(--accent); }
+  .card b { display: block; font-size: 17px; margin-bottom: 4px; color: var(--accent); }
+  .card span { color: var(--muted); font-size: 14px; }
+  .pipe { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 12px 0; }
+  .step { flex: 1 1 140px; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; font-size: 14px; }
+  .step b { display: block; font-size: 15px; }
+  .step small { color: var(--muted); }
+  .arrow { align-self: center; color: var(--muted); }
+  pre, code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13.5px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; }
+  tr:last-child td { border-bottom: 0; }
+  td code { word-break: break-all; }
+  button.copy { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px;
+    font-size: 12px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
+  .muted { color: var(--muted); }
+  .note { border-left: 3px solid var(--accent); padding: 4px 12px; color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <img src="icon.png" alt="">
+  <div>
+    <h1>IPCR Forge</h1>
+    <div class="muted" id="host"></div>
+  </div>
+</header>
+<p class="lede">From <code>git push</code> to <code>docker pull</code> on any server, without a central
+service. Code lives on Radicle, Gitea Actions builds it, and IPCR serves the image from IPFS.</p>
+
+<div class="cards">
+  <a class="card" id="link-radicle" href="#"><b>Radicle</b><span>Browse repositories, issues and patches. Public.</span></a>
+  <a class="card" id="link-gitea" href="#"><b>Gitea</b><span>Builds, logs and the staging registry. Sign in as <code>gitea_admin</code>.</span></a>
+  <a class="card" href="#images"><b>Published images</b><span>What this server serves from IPFS, with the line to put in a compose file.</span></a>
+</div>
+
+<h2 id="how">How it works</h2>
+<div class="pipe">
+  <div class="step"><b>1 · Push</b><small><code>git push rad</code> a <code>v*</code> tag to the Radicle network</small></div>
+  <div class="arrow">→</div>
+  <div class="step"><b>2 · Bridge</b><small>repos with <code>.gitea/workflows/</code> are copied into Gitea</small></div>
+  <div class="arrow">→</div>
+  <div class="step"><b>3 · Build</b><small>Gitea Actions builds the image into Gitea's registry</small></div>
+  <div class="arrow">→</div>
+  <div class="step"><b>4 · IPFS</b><small>IPCR imports each tag and publishes it under an IPNS name</small></div>
+  <div class="arrow">→</div>
+  <div class="step"><b>5 · Pull</b><small>any server with IPCR: <code>ipcr.localhost:4767/ipns/…</code></small></div>
+</div>
+<p>Steps 2 to 4 are automatic and take two to three minutes. A repository needs no configuration
+beyond committing a workflow.</p>
+
+<h2 id="images">Published images</h2>
+<div id="images-body"><p class="muted">Loading…</p></div>
+
+<h2 id="publish">Publish a project</h2>
+<ol>
+  <li><b>Install Radicle</b> on your machine and create an identity: see
+    <a href="https://radicle.xyz/" target="_blank" rel="noopener">radicle.xyz</a>, then <code>rad auth</code>.</li>
+  <li><b>Connect to this server's node</b> so your pushes reach it:
+    <pre><code id="connect-cmd">rad node connect &lt;node-id&gt;@&lt;this server&gt;:8776</code></pre></li>
+  <li><b>Publish the repository</b> from its folder: <code>rad init</code>. It prints a repository
+    ID (<code>rad:z…</code>).</li>
+  <li><b>Let this node seed it.</b> The node only keeps repositories it is told to (seeding policy
+    <i>block</i>). In this server's Terminal app or over SSH:
+    <pre><code>docker exec radicle-node rad seed rad:z… --scope all</code></pre></li>
+  <li><b>Add a workflow</b> at <code>.gitea/workflows/build.yml</code>. This one builds the
+    <code>Dockerfile</code> at the root and publishes it for every <code>v*</code> tag. The
+    <code>REGISTRY_TOKEN</code> secret is already set for every repository.
+<pre><code>on:
+  push:
+    tags: ['v*']
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Registry address
+        id: registry
+        run: echo "host=&#36;{GITHUB_SERVER_URL#https://}" &gt;&gt; "&#36;GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: &#36;{{ steps.registry.outputs.host }}/&#36;{{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: &#36;{{ steps.registry.outputs.host }}
+          username: &#36;{{ github.repository_owner }}
+          password: &#36;{{ secrets.REGISTRY_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: &#36;{{ steps.meta.outputs.tags }}
+          labels: &#36;{{ steps.meta.outputs.labels }}</code></pre></li>
+  <li><b>Release:</b>
+<pre><code>git tag v1.0.0
+git push rad main v1.0.0</code></pre>
+    Follow the build in Gitea under <code>gitea_admin/&lt;repo&gt;</code> → Actions. A minute after
+    it finishes, the tag appears under <a href="#images">Published images</a>.</li>
+</ol>
+
+<h2 id="use">Use an image</h2>
+<p>Copy the line from <a href="#images">Published images</a> into a compose file. It works on this
+server and on any server running IPCR:</p>
+<pre><code>services:
+  myapp:
+    image: ipcr.localhost:4767/ipns/k51qzi5uqu5d…:1.0.0   # a tag: follows new builds of 1.0.0
+    # image: ipcr.localhost:4767/ipfs/bafkrei…           # a CID: this exact image, forever</code></pre>
+<p><code>/ipns/&lt;name&gt;:&lt;tag&gt;</code> is a name the publisher can move to a new build.
+<code>/ipfs/&lt;cid&gt;</code> is the image's content address and can never change.</p>
+<p class="note">For a readable name, add a DNS TXT record <code>_dnslink.example.com</code> =
+<code>dnslink=/ipns/k51…</code> to a domain you own. The image is then
+<code>ipcr.localhost:4767/ipns/example.com:1.0.0</code>.</p>
+
+<h2 id="install">Pull from another server</h2>
+<p>Any server with IPCR resolves the same lines and fetches the image from the IPFS network,
+from this server and from every other server that already pulled it.</p>
+<h3>On a Yundera server</h3>
+<p>Install <b>IPCR</b> from the App Store. There is nothing to configure.</p>
+<h3>On any Linux server with Docker 29+</h3>
+<pre><code>mkdir -p /DATA/AppData/ipcr &amp;&amp; cd /DATA/AppData/ipcr
+curl -fsSLO https://raw.githubusercontent.com/Yundera/ipcr/main/apps/IPCR/docker-compose.yml
+install -d -m 0700 -o 1000 -g 1000 kubo &amp;&amp; install -d -o 1000 -g 1000 init.d
+curl -fsSL -o init.d/01-ipcr-node.sh https://raw.githubusercontent.com/Yundera/ipcr/main/apps/IPCR/seed/init.d/01-ipcr-node.sh
+chmod 0755 init.d/01-ipcr-node.sh
+printf 'PUID=1000\nPGID=1000\nTZ=UTC\nAppID=ipcr\n' &gt; .env
+docker compose up -d</code></pre>
+<p class="muted">IPCR listens on <code>127.0.0.1:4767</code> only, and trusts itself through
+<code>/etc/docker/certs.d/ipcr.localhost:4767/ca.crt</code>. It publishes port 4768 (TCP and UDP)
+for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blank" rel="noopener">github.com/Yundera/ipcr</a>.</p>
+
+<h2 id="addresses">Addresses on this server</h2>
+<div class="scroll"><table>
+  <tr><th>Address</th><th>What</th></tr>
+  <tr><td><a id="t-radicle" href="#"></a></td><td>Radicle explorer (public)</td></tr>
+  <tr><td><a id="t-radicle-api" href="#"></a></td><td>Radicle API and read-only git over HTTPS (public)</td></tr>
+  <tr><td><a id="t-gitea" href="#"></a></td><td>Gitea: builds, logs, staging registry</td></tr>
+  <tr><td><code>ipcr.localhost:4767</code></td><td>IPCR registry, for this server's Docker only</td></tr>
+  <tr><td>TCP 8776 · TCP/UDP 4768</td><td>Radicle peers · IPFS peers</td></tr>
+</table></div>
+
+<footer>IPCR Forge · Radicle · Gitea · Kubo · nerdctl · <a href="https://github.com/Yundera/ipcr" target="_blank" rel="noopener">IPCR</a></footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var host = location.hostname;
+  var base = host.indexOf("ipcr-forge-") === 0 ? host.slice("ipcr-forge-".length) : null;
+  function url(prefix) { return base ? "https://" + prefix + "-" + base : "#"; }
+  function setLink(id, prefix, text) {
+    var a = document.getElementById(id);
+    if (!a) return;
+    a.href = url(prefix);
+    if (text) a.textContent = base ? prefix + "-" + base : prefix + "-<domain>";
+  }
+  document.getElementById("host").textContent = base || host;
+  setLink("link-radicle", "radicle");
+  setLink("link-gitea", "gitea");
+  setLink("t-radicle", "radicle", true);
+  setLink("t-radicle-api", "radicle-api", true);
+  setLink("t-gitea", "gitea", true);
+
+  function el(tag, text, cls) {
+    var e = document.createElement(tag);
+    if (text != null) e.textContent = text;
+    if (cls) e.className = cls;
+    return e;
+  }
+  function copyButton(text) {
+    var b = el("button", "Copy", "copy");
+    b.type = "button";
+    b.addEventListener("click", function () {
+      var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { window.prompt("Copy:", text); });
+      } else { window.prompt("Copy:", text); }
+    });
+    return b;
+  }
+  function cmpTags(a, b) {
+    if (a === "latest") return -1;
+    if (b === "latest") return 1;
+    var pa = a.split(/[.-]/), pb = b.split(/[.-]/);
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+      var x = pa[i] || "", y = pb[i] || "";
+      var nx = parseInt(x, 10), ny = parseInt(y, 10);
+      if (!isNaN(nx) && !isNaN(ny) && nx !== ny) return ny - nx;
+      if (x !== y) return x < y ? 1 : -1;
+    }
+    return 0;
+  }
+
+  var body = document.getElementById("images-body");
+  fetch("images.json", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (pub) {
+      var reg = pub.registry || "ipcr.localhost:4767";
+      var repos = Object.keys(pub.images || {}).sort();
+      if (!repos.length) throw new Error("empty");
+      body.textContent = "";
+      repos.forEach(function (repo) {
+        var r = pub.images[repo];
+        body.appendChild(el("h3", repo.replace(/^gitea_admin\//, "")));
+        var wrap = el("div", null, "scroll");
+        var t = el("table");
+        var head = el("tr");
+        ["Tag", "Compose line", ""].forEach(function (h) { head.appendChild(el("th", h)); });
+        t.appendChild(head);
+        Object.keys(r.tags).sort(cmpTags).forEach(function (tag) {
+          var info = r.tags[tag];
+          var line = "image: " + reg + "/ipns/" + r.ipns + ":" + tag;
+          var tr = el("tr");
+          var td1 = el("td"); td1.appendChild(el("code", tag));
+          if (info.at) td1.appendChild(el("div", info.at.replace("T", " ").replace("Z", " UTC"), "muted"));
+          var td2 = el("td"); td2.appendChild(el("code", line));
+          var pin = el("div", null, "muted");
+          pin.appendChild(document.createTextNode("this build only: "));
+          pin.appendChild(el("code", reg + "/ipfs/" + info.cid));
+          td2.appendChild(pin);
+          var td3 = el("td"); td3.appendChild(copyButton(line));
+          tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+          t.appendChild(tr);
+        });
+        wrap.appendChild(t);
+        body.appendChild(wrap);
+      });
+    })
+    .catch(function () {
+      body.innerHTML = "";
+      body.appendChild(el("p", "Nothing published yet. Push a v* tag from a repository with a workflow (see below); its image appears here a few minutes later.", "muted"));
+    });
+
+  // The node's ID and dialable address, for `rad node connect`. The Radicle API is public and
+  // CORS-enabled (the explorer calls it from the browser). The address must be the node's own
+  // externalAddresses entry (radicle-<ip>.sslip.io:8776): the *-<domain> names are behind an
+  // HTTP proxy that does not carry port 8776.
+  if (base) {
+    fetch(url("radicle-api") + "/api/v1/node", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (node) {
+        var addrs = (node.config && node.config.externalAddresses) || [];
+        if (node.id && addrs.length) {
+          document.getElementById("connect-cmd").textContent =
+            "rad node connect " + node.id + "@" + addrs[0];
+        }
+      })
+      .catch(function () {});
+  }
+})();
+</script>
+</body>
+</html>

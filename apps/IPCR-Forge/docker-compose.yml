@@ -11,6 +11,11 @@ name: ipcr-forge
 #     → ipcr-kubo / ipcr-registry
 #   docker pull ipcr.localhost:4767/ipns/<name>:1.2.3         (anyone)
 #
+# The tile opens ipcr-forge-<domain>: a static landing page (nginx) that explains the pipeline,
+# links Radicle and Gitea, and lists every published image with the exact `image:` line to use
+# (IPCR's published.json, served as /images.json). <name> is the IPNS key IPCR minted for the
+# repository (k51…), not the repository's name, which is why the page lists it.
+#
 # Every service is copied verbatim from its standalone listing (apps/Radicle, apps/Gitea,
 # apps/Radicle-Gitea-Bridge, apps/IPCR), so each keeps its own comments and rationale.md.
 # Only the data folders move, one subfolder per part: $AppID/{radicle,gitea,bridge,ipcr}/.
@@ -24,6 +29,53 @@ name: ipcr-forge
 # bridge-credentials step mints. Gitea does not know IPCR exists.
 
 services:
+  # ═══ Landing page — the tile's web UI ══════════════════════════════════════════
+  # Static: the page, its icon, and IPCR's list of published images (read-only). It shows only
+  # links, documentation and image names that are public on IPFS anyway, so it is not behind
+  # the SSO gate; Gitea keeps its own login, Radicle is public by design.
+  ipcr-forge:
+    image: nginxinc/nginx-unprivileged:1.29.3-alpine
+    container_name: ipcr-forge
+    user: $PUID:$PGID
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    cpu_shares: 80
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    environment:
+      TZ: $TZ
+    tmpfs:
+      # nginx-unprivileged keeps its pid file and temp paths here.
+      - /tmp
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/site:/usr/share/nginx/html:ro
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/web/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # published.json → /images.json. Read-only; the location in default.conf serves that file only.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/state:/srv/ipcr-state:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    expose:
+      - 8080
+    labels:
+      caddy_0: ipcr-forge-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy_1: ipcr-forge-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 8080}}"
+      caddy_2: ipcr-forge-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 8080}}"
+    networks:
+      - pcs
+
   # ═══ Radicle — the source of truth ═════════════════════════════════════════════
   # Verbatim from apps/Radicle; only its data folder moves to $AppID/radicle/.
 
@@ -484,12 +536,16 @@ networks:
 x-casaos:
   architectures:
     - amd64
-  main: radicle
+  main: ipcr-forge
   author: Yundera
   developer: Yundera
   category: Developer
   tags: ["developer", "git", "ci", "needs-public-ip"]
   icon: icon.png
+  screenshot_link:
+    - screenshot-1.png
+    - screenshot-2.png
+    - screenshot-3.png
   title:
     en_us: IPCR Forge
   tagline:
@@ -506,6 +562,9 @@ x-casaos:
       A repository joins the pipeline by committing a workflow under `.gitea/workflows/`: there
       is nothing to configure per project.
 
+      Its own page explains how to publish a project and lists every published image with the
+      line to put in a compose file.
+
       This app bundles the Radicle, Gitea, Radicle Gitea Bridge and IPCR apps. Install it instead
       of them, not beside them.
     fr_fr: |
@@ -518,6 +577,9 @@ x-casaos:
       Un dépôt rejoint la chaîne en ajoutant un workflow sous `.gitea/workflows/` : rien à
       configurer par projet.
 
+      Sa page explique comment publier un projet et liste chaque image publiée avec la ligne à
+      mettre dans un fichier compose.
+
       Cette application regroupe les applications Radicle, Gitea, Radicle Gitea Bridge et IPCR.
       Installez-la à leur place, pas à côté.
   tips:
@@ -528,6 +590,7 @@ x-casaos:
 
         | Address | What |
         | --- | --- |
+        | `https://ipcr-forge-$APP_DOMAIN` | This app: how to publish, and every published image |
         | `https://radicle-$APP_DOMAIN` | Radicle explorer (public) |
         | `https://radicle-api-$APP_DOMAIN` | Radicle API and read-only git (public) |
         | `https://gitea-$APP_DOMAIN` | Gitea: builds, logs, staging registry (`gitea_admin`) |
@@ -537,13 +600,15 @@ x-casaos:
 
         **Images reach IPFS on their own.** IPCR follows this app's Gitea registry: about a
         minute after a build pushes `gitea_admin/<repo>:<tag>`, it can be pulled as
-        `ipcr.localhost:4767/ipns/gitea_admin-<repo>:<tag>`.
+        `ipcr.localhost:4767/ipns/<name>:<tag>`, where `<name>` is the IPNS name (`k51…`) IPCR
+        creates for the repository. The app's page lists each one with the line to copy.
       fr_fr: |
         **Remplace quatre applications.** Désinstallez d'abord Radicle, Gitea, Radicle Gitea
         Bridge et IPCR : cette application utilise les mêmes adresses et ports.
 
         | Adresse | Quoi |
         | --- | --- |
+        | `https://ipcr-forge-$APP_DOMAIN` | Cette application : publier, et toutes les images publiées |
         | `https://radicle-$APP_DOMAIN` | Explorateur Radicle (public) |
         | `https://radicle-api-$APP_DOMAIN` | API Radicle et git en lecture seule (public) |
         | `https://gitea-$APP_DOMAIN` | Gitea : builds, journaux, registre de transit (`gitea_admin`) |
@@ -553,7 +618,8 @@ x-casaos:
 
         **Les images arrivent sur IPFS d'elles-mêmes.** IPCR suit le registre Gitea de cette
         application : environ une minute après qu'un build a poussé `gitea_admin/<dépôt>:<tag>`,
-        elle se tire avec `ipcr.localhost:4767/ipns/gitea_admin-<dépôt>:<tag>`.
+        elle se tire avec `ipcr.localhost:4767/ipns/<nom>:<tag>`, où `<nom>` est le nom IPNS
+        (`k51…`) qu'IPCR crée pour le dépôt. La page de l'application les liste, prêts à copier.
   index: /
   webui_port: 8080
   store_app_id: ipcr-forge
@@ -561,6 +627,13 @@ x-casaos:
 x-compose-app:
   schema_version: 2
   folders:
+    # ── Landing page ──
+    - path: /DATA/AppData/$AppID/site
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/web
+      user: $PUID
+      group: $PGID
     # ── Radicle ──
     - path: /DATA/AppData/$AppID/radicle/home
       user: $PUID
@@ -608,6 +681,20 @@ x-compose-app:
       group: $PGID
       mode: "0700"
   files:
+    # The landing page follows store updates: re-rendered on every up. None of the three holds a
+    # dollar-brace sequence, so rendering cannot fail on an unresolved variable.
+    - path: /DATA/AppData/$AppID/site/index.html
+      from: site/index.html
+      ensure: always
+      mode: "0644"
+    - path: /DATA/AppData/$AppID/site/icon.png
+      from: site/icon.png
+      ensure: always
+      mode: "0644"
+    - path: /DATA/AppData/$AppID/web/default.conf
+      from: web/default.conf
+      ensure: always
+      mode: "0644"
     # Each entry and its reason are in the standalone listing it comes from.
     - path: /DATA/AppData/$AppID/radicle/home/config.json
       from: radicle/home/config.json.tmpl
@@ -683,5 +770,5 @@ x-compose-app:
         - -c
         - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" IPCR_AUTH_FILE=/ipcr-secrets/registry-auth bridge-init
       when: absent:/DATA/AppData/$AppID/bridge/secrets/gitea-token
-  webui-host: radicle-${domain}
+  webui-host: ipcr-forge-${domain}
   webui-path: /
