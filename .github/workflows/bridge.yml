@@ -1,13 +1,13 @@
-name: rad-actions
+name: bridge
 
-# The Forge's CI image (ci/): radicle-ci-broker + act + the rad-actions adapter.
+# IPCR Forge's bridge image (bridge/): Gitea → Radicle mirror + the forge's page.
 on:
   push:
     branches: [main]
-    tags: ["rad-actions-v*"]
-    paths: ["ci/**", ".github/workflows/rad-actions.yml"]
+    tags: ["bridge-v*"]
+    paths: ["bridge/**", ".github/workflows/bridge.yml"]
   pull_request:
-    paths: ["ci/**", ".github/workflows/rad-actions.yml"]
+    paths: ["bridge/**", ".github/workflows/bridge.yml"]
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/yundera/rad-actions
+  IMAGE: ghcr.io/yundera/ipcr-forge-bridge
 
 jobs:
   vet:
@@ -24,9 +24,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: ci/adapter/go.mod
+          go-version-file: bridge/go.mod
       - run: test -z "$(gofmt -l .)" && go vet ./... && go test ./...
-        working-directory: ci/adapter
+        working-directory: bridge
 
   image:
     needs: vet
@@ -45,17 +45,17 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=match,pattern=rad-actions-v(.*),group=1
+            type=match,pattern=bridge-v(.*),group=1
             type=ref,event=branch
             type=sha
-      # amd64 only: cib is a Rust build that takes most of an hour under QEMU, and the Forge
-      # listing is amd64 only.
+      # amd64 only: the Radicle CLI is fetched as its x86_64 release, and the Forge listing is
+      # amd64 only.
       - uses: docker/build-push-action@v6
         with:
-          context: ci
+          context: bridge
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha,scope=rad-actions
-          cache-to: type=gha,mode=max,scope=rad-actions
+          cache-from: type=gha,scope=bridge
+          cache-to: type=gha,mode=max,scope=bridge

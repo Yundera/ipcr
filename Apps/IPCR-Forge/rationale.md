@@ -1,112 +1,148 @@
 # IPCR Forge — Rationale
 
-IPCR Forge bundles two store apps (Radicle, IPCR), the node's own CI (`rad-actions`) and a static
-landing page. The Radicle and IPCR services are copied verbatim, so each keeps the deviations its
-standalone listing already argues. This document lists them, then covers only what the bundle adds.
+IPCR Forge bundles three store apps (Gitea, Radicle, IPCR), a CI runner with its own Docker daemon,
+and the bridge (`ipcr-forge-bridge`), which mirrors public Gitea repositories to Radicle and
+serves the forge's page. The Gitea, Radicle and IPCR services are copied from their listings,
+so each keeps the deviations its standalone listing already argues. This document lists them,
+then covers only what the bundle adds.
 
-Earlier versions built with Gitea Actions, fed by a bridge that copied every Radicle repository
-into Gitea. That made two places where state could start (Gitea held a second copy of each
-repository, with its own PRs, issues and registry) and needed a glue service to keep them in step.
-Gitea, its runner and the bridge are gone; the CI now runs on the Radicle node itself.
+Gitea is the source of truth. Earlier versions made Radicle the source: first with a read-only
+Gitea fed from it (v1), then with CI on the Radicle node alone (v2). Users found both hard to work
+with. See docs/forge.md.
 
 ## What deviation / exception is being requested
 
-**Inherited, unchanged** (the full argument is in each listing's `rationale.md`):
+**Inherited, unchanged.** The full argument for each is in that listing's `rationale.md`.
 
 | From | Deviation |
 | --- | --- |
+| Gitea | An admin account (`gitea_admin`) created with the server's default app password |
 | Radicle | No authentication gate on `radicle-` and `radicle-api-<domain>`; host port `8776/tcp` |
 | IPCR | `ipcr-gateway` and `ipcr-registry` run as root (no capabilities); `/etc/docker/certs.d` mounted; no authentication; ports `127.0.0.1:4767` and `4768/tcp+udp` |
 
 **Added by the bundle:**
 
-1. **`rad-actions-docker` runs `privileged`** (Docker-in-Docker), as Gitea's runner did.
-2. **`rad-actions` mounts the Radicle node's home read-write**, including the node's key.
-3. **A cross-app network link.** `ipcr-gateway` joins `ci-internal`, where the staging registry is.
-4. **A public landing page, including the CI's pages.** `ipcr-forge-<domain>` and its `/ci/`
-   (run reports and logs) are not behind the SSO gate.
-5. **It replaces two apps** and cannot be installed beside them: same container names, domains
-   and host ports.
+1. **`forge-docker` runs `privileged`** (Docker-in-Docker), as Gitea's runner did.
+2. **The bridge (`ipcr-forge`) mounts the Radicle node's home read-write**, including the node's
+   key. It publishes repositories signed by that key.
+3. **A system webhook and its allow-list.** Gitea may deliver webhooks to `ipcr-forge` on the
+   server's network (`GITEA__webhook__ALLOWED_HOST_LIST: external,ipcr-forge`).
+4. **An install step that uses the admin password** to mint the bridge's token and to register
+   that webhook.
+5. **A cross-app network link.** `ipcr-gateway` joins `ci-internal`, where the staging registry
+   is.
+6. **A public page.** `ipcr-forge-<domain>` is not behind the SSO gate.
+7. **Public repositories are published to Radicle automatically**, and that cannot be undone.
+8. **It replaces three apps** and cannot be installed beside them: it uses the same container names,
+   domains and host ports.
 
 ## Why it is necessary
 
-**1. Privileged Docker-in-Docker.** Building an image needs a Docker daemon. The two ways to give
-a CI job one are the host's socket (root on the PCS for every workflow) or a daemon of its own,
-which needs `privileged`. The second confines a build to its own container and image store. The
-rootless variant does not start on this platform (`kernel.apparmor_restrict_unprivileged_userns=1`;
-see Apps/Gitea/rationale.md, where it was tried first).
+**1. Privileged Docker-in-Docker.** Building an image needs a Docker daemon. A CI job can get one
+in two ways:
+- the host's socket, which gives every workflow root on the PCS;
+- a daemon of its own, which needs `privileged`.
 
-**2. The node's home.** The CI broker (`cib`, upstream `radicle-ci-broker`) is a client of the
-node: it subscribes to the node's events over the control socket in that folder, reads repository
-storage to check out a commit, and writes each run's result back into the repository as a job COB,
-which the node's key signs. This is the mount `radicle-api` already has. It is what removes the
-mirror: the build reads the commit where it lives, so there is no copy to drift.
+The second keeps a build inside its own container and image store. The rootless variant does
+not start on this platform (`kernel.apparmor_restrict_unprivileged_userns=1`; see
+Apps/Gitea/rationale.md, where it was tried first). The runner itself is a separate, unprivileged
+container that reaches the daemon over a unix socket.
 
-**3. The network link.** IPCR publishes images by *pulling* them: it polls a registry and imports
-every new tag into IPFS. Jobs run in the CI's own daemon, which cannot reach `ipcr.localhost` (that
-name is the host's loopback), so a workflow pushes to a staging registry instead. That registry
-shares the daemon's network namespace, so it is `localhost:5000` to every job — the only address
-Docker and BuildKit accept plain HTTP for, so no TLS or credentials are involved. `ipcr-gateway`
-reaches it as `rad-actions-docker:5000` over `ci-internal`.
+**2. The node's home.** Publishing to Radicle means three things: creating a repository in the
+node's storage, signing its refs with the node's key, and announcing them through the node's
+control socket. Those live in that folder. This is the mount `radicle-api` already has. The bridge
+uses the stock `rad` CLI (1.10.1, the node's version) rather than reimplementing any of it.
 
-**4. The public pages.** The landing page holds links, documentation and image names that are
-public on IPFS anyway. `/ci/` shows `cib`'s report pages and the run logs. Radicle repositories are
-public by design, and the adapter refuses to run a private repository, so a log never shows code
-that is not already public. A login in front would stand between a developer and their build log.
+**3. The webhook.** Pushes reach Radicle within seconds instead of at the next 10-minute
+reconcile. Gitea's default allow-list (`external`) refuses private addresses, and the bridge sits
+on one. The list adds exactly one host name. `private` would let any user's webhook reach every
+container on the shared network.
 
-**5. Replacing two apps.** The bundle is the same services, not a different product. Renaming every
-container, domain and port to coexist would break the defaults the services rely on
-(`radicle-api:8080`) and the documented addresses users type.
+**4. The admin password at install.** Gitea's token API and its system-webhook API accept only an
+administrator signing in. The step uses the password once per start, never stores it, and
+leaves the running service holding nothing but a `public-only`, `read:repository` token. If the
+password has been changed, the step keeps the existing token and webhook instead of failing.
+
+**5. The network link.** IPCR publishes images by *pulling* them: it polls a registry and
+imports every new tag into IPFS. Jobs run in the CI's own daemon, which cannot reach
+`ipcr.localhost`, because that name is the host's loopback. So a workflow pushes to a staging
+registry instead. That registry shares the daemon's network namespace, so every job sees it as
+`localhost:5000`. That is the only address Docker and BuildKit accept plain HTTP for, so no TLS
+or credentials are involved. `ipcr-gateway` reaches it as `forge-docker:5000` over `ci-internal`.
+
+**6. The public page.** It holds links, documentation, image names that are public on IPFS anyway,
+and the list of repositories already public on Radicle. A login in front of it would stand between
+a stranger and the instructions for pulling an image.
+
+**7. Publishing to Radicle.** That is the point of the mirror: the code of a released image stays
+available without this server. Only public repositories go. A public Gitea repository is meant to
+be read by anyone, and Radicle is one more place to read it.
+
+**8. Replacing three apps.** The bundle runs the same services, not a different product. Renaming
+every container, domain and port so they could coexist would break the defaults the services rely
+on (`radicle-api:8080`, `gitea:3000`) and the addresses users type.
 
 ## Security mitigations in place
 
-- **Only delegates can start a build.** `cib`'s filter (ci/ci-broker.yaml) runs CI only for changes
-  that come from a delegate of the repository (`AnyDelegate`): release tags, the default branch and
-  their patches. A stranger's patch is never run. This matters because a build can publish: what a
-  job pushes to the staging registry ends up on IPFS under the repository's IPNS name. A build
-  therefore gets exactly the trust of a release.
-- **The privileged daemon has no network listener.** `dockerd` gets an explicit
-  `--host=unix:///run/dind/docker.sock` and `DOCKER_TLS_CERTDIR` is empty, so the entrypoint adds no
-  TCP socket. The unix socket sits in a folder shared only with `rad-actions`, group `$PGID`.
-- **`rad-actions` itself runs unprivileged:** `$PUID`, every capability dropped,
-  `no-new-privileges`, 512 MB. Whoever controls it controls the daemon (that is the point of the
-  socket), so it accepts no input but the node's events and a workflow from a delegate.
-- **The node's key never enters a job.** Jobs run in the nested daemon from a self-contained,
-  depth-1 checkout that the adapter fetched; the Radicle home is not mounted into them.
-- **The staging registry is unreachable from outside.** No port, no Caddy route, on `ci-internal`
-  only (`rad-actions`, the daemon and `ipcr-gateway`). It runs as `$PUID` with no capabilities.
-- **Bounded.** One run at a time (`concurrent_adapters: 1`), 60 minutes per run, 2 GB for the daemon.
-- **The landing page cannot change anything.** `nginx-unprivileged` runs as `$PUID` with a
-  read-only root filesystem, no capabilities, `no-new-privileges` and 32 MB. It mounts the page,
-  its config, IPCR's `state/` and the CI's `html/`, all read-only, and serves static files only.
-  From `state/` it maps exactly one file (`/images.json` → `published.json`).
-- **The CI is severable.** Stopping `rad-actions` and `rad-actions-docker` removes the privileged
-  container and leaves a working Radicle node and IPCR registry.
-- **Smaller than what it replaces.** Gone: an admin account with the default password, two minted
-  tokens, the `DAC_READ_SEARCH` capability IPCR needed to read one of them, and a second git server.
+**The bridge**
+- **It sees public repositories only.** Its Gitea token is scoped `public-only` and
+  `read:repository`. Gitea hides every private or limited repository from it, and it can write
+  nothing in Gitea. The code checks visibility a second time. Forks and pull mirrors are skipped.
+- **Webhooks are authenticated and carry no content.** Each delivery must pass the HMAC-SHA256
+  check against a random secret written at install (`bridge/secrets`, 0700). A delivery only says
+  *which* repository changed. The bridge re-reads that repository from Gitea, so a forged payload
+  can at most cause a pointless sync. Port 8081 has no Caddy route.
+- **It runs unprivileged:** `$PUID`, every capability dropped, a read-only root filesystem,
+  `no-new-privileges`, 256 MB. One worker does one sync at a time.
+- **The node's key stays in the bridge and the node.** No CI job mounts the Radicle home.
+
+**The CI daemon**
+- **No network listener.** `dockerd` gets an explicit `--host=unix:///run/dind/docker.sock` and an
+  empty `DOCKER_TLS_CERTDIR`. The unix socket sits in a folder shared only with `forge-runner`,
+  group `$PGID`.
+- **`forge-runner` runs unprivileged:** `$PUID`, no capabilities, `no-new-privileges`. Jobs run in
+  the nested daemon, never on the host's.
+- **The staging registry is unreachable from outside.** It has no port and no Caddy route and sits
+  on `ci-internal` only. It runs as `$PUID` with no capabilities.
+- **Bounded.** One job at a time, at most 1 hour per job, 2 GB for the daemon.
+- **Severable.** Stopping `forge-runner` and `forge-docker` removes the privileged container and
+  leaves a working Gitea, Radicle node and IPCR registry.
+
+**Gitea**
+- **Fork pull requests wait for approval.** In Gitea 1.27, a run from a user without write access
+  waits for "Approve and run".
+- **Registration is off.** Every account is created by the admin.
+- **Who can publish is stated** in the tips and on the page. Write access to any repository means
+  being able to publish images under the forge's name. Images from private repositories become
+  public on IPFS.
+
+**The page**
+- **It cannot change anything.** It is served by the bridge's own read-only HTTP handler: the
+  embedded page, IPCR's `published.json` (mounted read-only) and the bridge's repository list.
 
 ## Alternatives considered and rejected
 
 | Alternative | Why not |
 | --- | --- |
-| Keep Gitea, fed by a bridge (previous version) | Two sources of state (a second copy of each repository, with its own PRs and registry) and a glue service to keep them in step. |
-| Gitea as a strict read-only mirror | Still a second git server and a sync to babysit, for one thing it adds: a web view of builds, which `cib`'s pages now provide. |
-| Gitea's `act_runner` in `exec` mode | Same engine as `act` (a fork), but built for Gitea; nektos `act` is what people run on their laptops. |
-| `cib`'s native adapter, or Ambient | Neither runs GitHub-style workflows; Ambient needs KVM. |
-| `ipcrd` accepting pushes itself | A push endpoint would be a second registry implementation. The staging registry plus IPCR's existing import is byte-identical to `nerdctl push` and needed no change. |
-| Host Docker socket for jobs | Any workflow would get root on the host. |
-| Run patches from anyone | Their build could publish under the repository's IPNS name. Needs a separate daemon with no registry first. |
+| Radicle as the source, Gitea read-only (v1) | Users had to work in Radicle and found a read-only Gitea confusing |
+| Radicle only, CI on the node (v2) | Not user-friendly enough: every step went through `rad` |
+| Gitea push mirror to Radicle | Gitea cannot push to `rad://` (no `git-remote-rad`), and mirror pushes run on a timer |
+| Publishing to Radicle from a workflow job | It would put the node's key inside CI jobs |
+| A per-repository webhook | Every repository would need setup; one system webhook covers all of them, including new ones |
+| Gitea's package registry as the staging registry (v1) | Needs tokens for the workflow and for IPCR, plus the `DAC_READ_SEARCH` capability for IPCR to read its token. It would also be a second place images get published from |
+| Host Docker socket for jobs | Any workflow would get root on the host |
+| A long-lived admin token for the bridge | The webhook is repaired by the install step on every start instead, so the running service never holds admin rights |
 
 ## Known limitations
 
-- **No job COB for tag builds.** cib 0.32.1 keys a job by the event's tip, which for an annotated
-  tag is the tag object rather than a commit, and creating that job fails (silently; the log only
-  shows `NoJob` when the run finishes). Branch and patch builds get their job COB. Tag builds still
-  appear in `/ci/` with their log. Upstream fix: peel the tag before creating the job.
-- **Tags arrive as pushes.** cib sends a tag event as `event_type: push` with the tag's name in
-  `branch`. The adapter tells them apart by looking for that name under `refs/tags/` in storage.
-- **`HasFile` matches files only**, not folders, so cib cannot pre-filter on a workflow folder; the
-  adapter answers "no workflow" itself.
+- **Radicle cannot unpublish.** A repository made private or deleted in Gitea is *frozen* (no
+  further sync). What already reached the network stays there.
+- **A deleted tag stays in Radicle's canonical `refs/tags/`.** It is removed from the node's own
+  namespace only.
+- **Radicle signatures are the forge's, not the developer's.** The node is each repository's only
+  delegate.
+- **Image names are not tied to repositories.** A build may push any name to the staging registry.
+  Per-repository credentials, issued by the bridge, are a planned follow-up.
 
 ## Data protection
 
@@ -114,12 +150,15 @@ Everything lives under `/DATA/AppData/ipcr-forge/`, one folder per part:
 
 | Folder | Holds |
 | --- | --- |
-| `radicle/` | node identity (key pair), seeded repositories (including job COBs), Caddy config |
-| `ci/` | `cib`'s database (`state/`), report pages and run logs (`html/`), act's action cache, the daemon's image store (`docker/`), the staging registry (`registry/`, disposable) |
+| `gitea/` | repositories, the database (SQLite), configuration, the runner's registration and config |
+| `radicle/` | node identity (key pair), seeded repositories, Caddy config |
+| `bridge/` | `state/`: the Gitea → Radicle mapping and one bare mirror per repository (disposable); `secrets/` (0700): its Gitea token and the webhook secret |
+| `ci/` | the daemon's socket, its image store (`docker/`), the staging registry (`registry/`, disposable) |
 | `ipcr/` | Kubo repo (node identity, IPNS keys, pinned images), TLS CA, watcher state |
-| `site/`, `web/` | the landing page and its nginx config, re-rendered on every start |
 
 No user directory (`/DATA/Documents`, `Media`, …) is mounted. The one file outside `/DATA` is
 IPCR's `/etc/docker/certs.d/ipcr.localhost:4767/ca.crt`, as in the standalone app. Identities that
-matter on the network (Radicle's node key, Kubo's node key and IPNS keys) survive uninstall and
-reinstall, so published repositories and image names stay valid.
+matter on the network survive uninstall and reinstall, so published repositories and image names
+stay valid:
+- Radicle's node key;
+- Kubo's node key and IPNS keys.

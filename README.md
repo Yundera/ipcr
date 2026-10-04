@@ -19,7 +19,7 @@ file that uses it works on any host running IPCR, and the image comes from which
 - **[docs/spec.md](docs/spec.md)**: the IPCR convention (address, paths, tag layout, image format).
 - **[docs/design.md](docs/design.md)**: why it is built this way, findings, open items.
 - **[docs/naming.md](docs/naming.md)**: image names: IPNS keys, publishers, DNSLink, ENS (`example.eth`), and options studied.
-- **[docs/forge.md](docs/forge.md)**: IPCR Forge: Radicle + Radicle CI + act → IPFS, why Gitea was removed, findings.
+- **[docs/forge.md](docs/forge.md)**: IPCR Forge: Gitea + Actions → IPFS, public repositories mirrored to Radicle; history, findings.
 - **[Apps/IPCR/](Apps/IPCR/)**: the Yundera AppStore listing.
 
 ## Install
@@ -97,7 +97,7 @@ Set `IPCR_IMPORT_WATCH` (in the app's `.env`, or the app settings) to a registry
 polls it every minute. Every tag of every repository in its catalog (or of `IPCR_IMPORT_REPOS`)
 is imported and published as `ipcr.localhost:4767/ipns/<owner-repo-key>:<tag>`. A tag is
 re-imported when its digest moves. This is how IPCR Forge's builds reach IPFS (it watches the
-CI's internal staging registry, `http://rad-actions-docker:5000`). Any registry works, e.g. a Gitea:
+CI's internal staging registry, `http://forge-docker:5000`). Any registry works, e.g. a Gitea:
 
 ```sh
 IPCR_IMPORT_WATCH=https://gitea-<domain>
@@ -124,6 +124,7 @@ docker compose run --rm cli ipcr push <image> [<app>[:<tag>]]
 gateway/         ipcrd — the IPCR gateway (Go, stdlib only)
 bin/             entrypoint (roles: gateway | registry | ipcr) and the ipcr CLI
 Dockerfile       one image for every role: ghcr.io/yundera/ipcr
+bridge/          IPCR Forge's bridge: Gitea → Radicle mirror and the forge's page (ghcr.io/yundera/ipcr-forge-bridge)
 Apps/          AppStore listings (IPCR, IPCR-Forge, IPCR-Demo); listing: compose, rationale, seed, assets
 docs/            spec and design notes
 ```
