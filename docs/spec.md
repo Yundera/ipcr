@@ -35,11 +35,17 @@ offered under another address.
 | `ipcr.localhost:4767/ipfs/<cid>` | The image whose root (§4) is `<cid>`. Immutable. The only valid tag is `latest`, which Docker applies by default. |
 | `ipcr.localhost:4767/ipfs/<cid>@sha256:<digest>` | Same image, pinned to a manifest digest. |
 | `ipcr.localhost:4767/ipns/<name>:<tag>` | The image a publisher currently names `<tag>` under `<name>` (§3). Mutable. |
+| `ipcr.localhost:4767/ipns/<name>/<path>:<tag>` | The same, for a publisher with several images: `<tag>` in the directory at `<path>` under `<name>` (§3). Mutable. |
 
 - `<cid>` MUST be a CIDv1 in lowercase base32 (`bafy…`, `bafk…`). Docker rejects uppercase
   repository names, so CIDv0 (`Qm…`) cannot be used.
 - `<name>` is either an IPNS key in lowercase base36 (`k51…`) or a DNSLink domain (`example.com`,
-  resolved via the `_dnslink.example.com` TXT record).
+  resolved via the `_dnslink.example.com` TXT record). ENS names (`example.eth`) are DNSLink
+  domains to an implementation built on Kubo, which resolves `.eth` through its DNS resolvers
+  (by default eth.limo's DNS-over-HTTPS; an operator MAY configure their own).
+- `<path>` is one or more `/`-separated segments in Docker's path-component grammar
+  (`[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*`). Names that are not lowercase ASCII (e.g. Unicode ENS
+  names) cannot be used: Docker rejects them.
 - `<tag>` follows Docker's tag grammar. With no tag, Docker asks for `latest`.
 
 Future path prefixes (for other content-addressed backends) MAY be added. `/ipfs/` and `/ipns/`
@@ -62,6 +68,22 @@ MUST keep their meaning.
   image root, in which case only the tag `latest` is valid.
 
 Moving a tag means publishing a new directory under the same IPNS name (or DNSLink record).
+
+A **publisher** with several images nests one such tag directory per image, at any depth:
+
+```
+/ipns/<name>/
+├── app-one/
+│   ├── latest  → <image root CID>
+│   └── 1.0.0   → <image root CID>
+└── team/app-two/
+    └── 2.3.1   → <image root CID>
+```
+
+`ipcr.localhost:4767/ipns/<name>/team/app-two:2.3.1` resolves `/ipns/<name>/team/app-two/2.3.1`. An
+implementation MUST resolve the whole path (`<name>/<path>/<tag>`) and apply §3's rules to the
+directory at `<path>`. A DNSLink or ENS record SHOULD point at an IPNS name (`/ipns/k51…`), not at
+an `/ipfs/` CID, so that publishing a release does not require changing the record.
 
 ## 4. Image format
 

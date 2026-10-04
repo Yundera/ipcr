@@ -1,0 +1,35 @@
+# Radicle CI broker (cib) configuration baked into the image. Fields: radicle-ci-broker
+# doc/userguide.md. Paths are the image's volumes; the adapter's settings come from the
+# container's environment, which cib passes through.
+description: |
+  <p>CI for the repositories this node seeds: GitHub-style workflows, run with act.
+  Images a run pushes are published on IPFS by IPCR.</p>
+db: /ci/state/cib.db
+report_dir: /ci/html
+max_run_time: 60min
+# One run at a time: every run shares one Docker daemon and one staging registry.
+concurrent_adapters: 1
+# Results are written back to the repository as job COBs (xyz.radworks.job), signed by this node.
+update_job_cobs: true
+adapters:
+  rad-actions:
+    command: rad-actions
+triggers:
+  - adapter: rad-actions
+    filters:
+      - !And
+        # Only changes signed by one of the repository's delegates: a run can publish an image,
+        # so it gets the same trust as a release. Patches from anyone else are not run.
+        - !AnyDelegate
+        # No !HasFile on the workflow folder: in cib 0.32.1 it matches files only (it wants a
+        # blob), never a directory. The adapter answers a repository without a matching workflow
+        # in a second, without touching Docker.
+        - !Or
+          - !TagCreated
+          - !TagUpdated
+          - !And
+            - !DefaultBranch
+            - !Not
+              - !BranchDeleted
+          - !PatchCreated
+          - !PatchUpdated

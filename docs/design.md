@@ -77,8 +77,11 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
     import and pin. The same cold pull then took 8 s. The root is enough: once a peer has found
     this node, bitswap fetches every other block over the same connection.
 9. **Forge handoff: poll, don't push.** CI jobs run in a nested Docker that cannot reach
-   `ipcr.localhost`, so IPCR pulls instead. The watcher polls the registry catalog, the same
-   zero-config shape as the Radicle → Gitea bridge.
+   `ipcr.localhost`, so IPCR pulls instead. The watcher polls the registry catalog. In IPCR Forge
+   that registry is the CI's internal staging registry; see [forge.md](forge.md).
+11. **One name for many images.** `/ipns/<name>/<path>:<tag>` and the watcher's publisher mode put
+    every image under one IPNS key, which an ENS or DNSLink name can point at once and for all.
+    Verified with `metadec.eth`; see [naming.md](naming.md).
 
 ## Open items
 
@@ -88,7 +91,10 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
 - **Narrow the host mount.** Write the CA from a one-shot `x-compose-app.init` step, so the
   long-running gateway needs no mount outside `/DATA`.
 - **Storage policy.** Auto-pin keeps every pulled image forever. Unpin images no container uses?
-- **DNSLink** is untested end to end. It goes through the same Kubo `resolve` call as IPNS keys, which is.
+- **DNSLink** with a plain DNS domain is untested end to end. ENS (`metadec.eth`) is verified, and
+  reaches Kubo as a DNSLink record, so the path is the same.
+- **Cross-host pull of a publisher path.** Verified on the publishing host only; other hosts need
+  ipcr 1.2.0.
 - **Podman**: document and test `/etc/containers/certs.d`.
 - **Publishing UX.** `ipcr push` needs the containerd socket (root-equivalent). `ipcr import`
   from a registry does not, and is the preferred path.

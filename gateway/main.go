@@ -1,6 +1,6 @@
 // ipcrd — IPCR gateway, a thin layer over `nerdctl ipfs registry serve`.
 //
-//	serve                     registry front door: /v2/ipfs/<cid> passthrough + /v2/ipns/<name>:<tag>
+//	serve                     registry front door: /v2/ipfs/<cid> passthrough + /v2/ipns/<name>[/<path>]:<tag>
 //	pin <rootCID>...          pin an nerdctl IPFS image *and every blob it references*
 //	tag <app> <tag> <rootCID> add a tag to the app's tag directory (MFS) and publish it under IPNS key <app>
 //	resolve <name> [tag]      print the root CID a name/tag resolves to
@@ -11,7 +11,10 @@
 // inside the JSON, so pinning the root CID alone leaves the layers collectable. `pin` walks them.
 //
 // IPNS layout: /ipns/<name> → UnixFS directory whose entries are tags, each entry being an image
-// root CID (as printed by `nerdctl push ipfs://`). <name> is an IPNS key (k51…) or a DNSLink domain.
+// root CID (as printed by `nerdctl push ipfs://`). <name> is an IPNS key (k51…) or a DNSLink domain
+// (which includes ENS: Kubo resolves `.eth` names). A publisher with several images puts one tag
+// directory per image under its name: /ipns/<name>/<image>/<tag>, pulled as
+// ipcr.localhost:4767/ipns/<name>/<image>:<tag>. The path may have any number of segments.
 package main
 
 import (
@@ -280,8 +283,45 @@ func autoPinOnce(root string) {
 
 // ---------------------------------------------------------------- tags / IPNS
 
+// tagImage adds <tag> → root to the app's tag directory and publishes that directory under the
+// IPNS key named <app> (one key per image).
 func tagImage(ctx context.Context, app, tag, root string) (string, error) {
-	dir := "/images/" + app
+	dir, err := tagDir(ctx, "/images/"+app, tag, root)
+	if err != nil {
+		return "", err
+	}
+	return publish(ctx, app, dir)
+}
+
+// publishImage adds <tag> → root under <repo> in the tree published by the IPNS key <key> — one
+// key for many images: /ipns/<key>/<repo>/<tag>. <repo> may contain "/" (nested directories).
+// It returns the pull name, "<k51…>/<repo>".
+func publishImage(ctx context.Context, key, repo, tag, root string) (string, error) {
+	publishMu.Lock()
+	defer publishMu.Unlock()
+	base := "/publishers/" + key
+	if _, err := tagDir(ctx, base+"/"+repo, tag, root); err != nil {
+		return "", err
+	}
+	var st struct{ Hash string }
+	if err := kuboJSON(ctx, "files/stat", url.Values{"arg": {base}, "hash": {"true"}}, &st); err != nil {
+		return "", err
+	}
+	if err := kuboJSON(ctx, "pin/add", arg(st.Hash), nil); err != nil {
+		return "", err
+	}
+	name, err := publish(ctx, key, st.Hash)
+	if err != nil {
+		return "", err
+	}
+	return name + "/" + repo, nil
+}
+
+// One publisher tree at a time: two writers would each publish a tree missing the other's tag.
+var publishMu sync.Mutex
+
+// tagDir sets <dir>/<tag> → root in Kubo's MFS and returns the directory's new CID, pinned.
+func tagDir(ctx context.Context, dir, tag, root string) (string, error) {
 	if err := kuboJSON(ctx, "files/mkdir", url.Values{"arg": {dir}, "parents": {"true"}}, nil); err != nil {
 		return "", err
 	}
@@ -296,6 +336,11 @@ func tagImage(ctx context.Context, app, tag, root string) (string, error) {
 	if err := kuboJSON(ctx, "pin/add", arg(st.Hash), nil); err != nil {
 		return "", err
 	}
+	return st.Hash, nil
+}
+
+// publish points the IPNS key <app> (created on first use) at /ipfs/<dir> and returns its name.
+func publish(ctx context.Context, app, dir string) (string, error) {
 	var keys struct{ Keys []struct{ Name, Id string } }
 	if err := kuboJSON(ctx, "key/list", nil, &keys); err != nil {
 		return "", err
@@ -311,14 +356,15 @@ func tagImage(ctx context.Context, app, tag, root string) (string, error) {
 	}
 	var pub struct{ Name, Value string }
 	err := kuboJSON(ctx, "name/publish", url.Values{
-		"arg": {"/ipfs/" + st.Hash}, "key": {app}, "ipns-base": {"base36"}, "allow-offline": {"true"},
+		"arg": {"/ipfs/" + dir}, "key": {app}, "ipns-base": {"base36"}, "allow-offline": {"true"},
 	}, &pub)
-	log.Printf("%s:%s → %s ; dir %s published as /ipns/%s", app, tag, root, st.Hash, pub.Name)
+	log.Printf("key %s: dir %s published as /ipns/%s", app, dir, pub.Name)
 	return pub.Name, err
 }
 
-// resolveTag maps /ipns/<name>/<tag> to an image root CID. A name that points straight at an
-// image root (not a tag directory) is accepted for the "latest" tag.
+// resolveTag maps /ipns/<name>/<tag> to an image root CID. <name> may carry a path
+// (aptero.eth/myapp). A name that points straight at an image root (not a tag directory) is
+// accepted for the "latest" tag.
 func resolveTag(ctx context.Context, name, tag string) (string, error) {
 	var r struct{ Path string }
 	err := kuboJSON(ctx, "resolve", url.Values{"arg": {"/ipns/" + name + "/" + tag}, "recursive": {"true"}}, &r)
@@ -350,7 +396,9 @@ func listTags(ctx context.Context, name string) []string {
 
 var (
 	ipfsPath = regexp.MustCompile(`^/v2/ipfs/([a-z0-9]+)/(manifests|blobs)/(.+)$`)
-	ipnsPath = regexp.MustCompile(`^/v2/ipns/([a-z0-9][a-z0-9.-]*)/(manifests|blobs)/(.+)$`)
+	// <name> then any number of path segments in Docker's path-component grammar. The reference
+	// (tag or digest) never holds a "/", which keeps the split unambiguous.
+	ipnsPath = regexp.MustCompile(`^/v2/ipns/([a-z0-9][a-z0-9.-]*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*)/(manifests|blobs)/([^/]+)$`)
 )
 
 // Docker fetches manifests (by tag) before blobs (by digest only, no tag), so remember which roots
@@ -434,7 +482,7 @@ func serve() error {
 		}
 		m := ipnsPath.FindStringSubmatch(r.URL.Path)
 		if m == nil {
-			ociError(w, http.StatusNotFound, "NAME_UNKNOWN", "use <host>/ipfs/<cid> or <host>/ipns/<name>:<tag>")
+			ociError(w, http.StatusNotFound, "NAME_UNKNOWN", "use <host>/ipfs/<cid> or <host>/ipns/<name>[/<image>]:<tag>")
 			return
 		}
 		name, kind, ref := m[1], m[2], m[3]

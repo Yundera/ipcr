@@ -10,6 +10,7 @@ services:
     image: ipcr.localhost:4767/ipns/k51qzi5…:0.4            # a tag, via an IPNS key
   app3:
     image: ipcr.localhost:4767/ipns/myapp.example.com:v2    # a tag, via a DNSLink domain
+    image: ipcr.localhost:4767/ipns/example.eth/myapp:v2    # one of a publisher's images, via ENS
 ```
 
 `ipcr.localhost:4767` is a fixed local address that every IPCR host serves the same way. A compose
@@ -17,6 +18,8 @@ file that uses it works on any host running IPCR, and the image comes from which
 
 - **[docs/spec.md](docs/spec.md)**: the IPCR convention (address, paths, tag layout, image format).
 - **[docs/design.md](docs/design.md)**: why it is built this way, findings, open items.
+- **[docs/naming.md](docs/naming.md)**: image names: IPNS keys, publishers, DNSLink, ENS (`example.eth`), and options studied.
+- **[docs/forge.md](docs/forge.md)**: IPCR Forge: Radicle + Radicle CI + act → IPFS, why Gitea was removed, findings.
 - **[Apps/IPCR/](Apps/IPCR/)**: the Yundera AppStore listing.
 
 ## Install
@@ -93,7 +96,8 @@ Only the host's platform is kept (`IMPORT_PLATFORM=linux/arm64` to choose anothe
 Set `IPCR_IMPORT_WATCH` (in the app's `.env`, or the app settings) to a registry URL and IPCR
 polls it every minute. Every tag of every repository in its catalog (or of `IPCR_IMPORT_REPOS`)
 is imported and published as `ipcr.localhost:4767/ipns/<owner-repo-key>:<tag>`. A tag is
-re-imported when its digest moves. This is how the forge's Gitea builds reach IPFS:
+re-imported when its digest moves. This is how IPCR Forge's builds reach IPFS (it watches the
+CI's internal staging registry, `http://rad-actions-docker:5000`). Any registry works, e.g. a Gitea:
 
 ```sh
 IPCR_IMPORT_WATCH=https://gitea-<domain>
@@ -101,6 +105,13 @@ IPCR_IMPORT_AUTH=gitea_admin:<token with read:package>   # or IMPORT_AUTH_FILE=/
 ```
 
 The credentials are sent to the watched host only.
+
+Set `IPCR_IMPORT_PUBLISHER=<key name>` to publish every imported repository under that one IPNS key
+instead, as `ipcr.localhost:4767/ipns/<k51…>/<repo>:<tag>` (the key's name is in the log and in
+`state/published.json` as `publisher`). Point a domain at it once — ENS content hash
+`ipns://k51…`, or DNSLink `_dnslink.example.com` TXT `dnslink=/ipns/k51…` — and every image pulls
+as `ipcr.localhost:4767/ipns/example.eth/<repo>:<tag>`. Releases update the IPNS record only, never
+the domain. IPCR Forge does this by default, with the key `forge`.
 
 ## Develop
 

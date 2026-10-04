@@ -14,7 +14,7 @@ services:
   # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
   # registry below, resolves /ipns/<name>:<tag> itself, and pins every image it serves.
   ipcr-gateway:
-    image: ghcr.io/yundera/ipcr:1.1.0
+    image: ghcr.io/yundera/ipcr:1.2.0
     container_name: ipcr-gateway
     # Root for one reason: it writes its CA into the host's Docker trust store (the narrow
     # bind below), which is root-owned. See rationale.md.
@@ -39,6 +39,10 @@ services:
       IMPORT_WATCH: ${IPCR_IMPORT_WATCH:-}
       IMPORT_AUTH: ${IPCR_IMPORT_AUTH:-}
       IMPORT_REPOS: ${IPCR_IMPORT_REPOS:-}
+      # Optional: publish every imported repository under ONE IPNS key of this name, as
+      # /ipns/<key>/<repo>:<tag>, instead of one key per repository. Point a DNSLink domain or an
+      # ENS name at that key and images pull as ipcr.localhost:4767/ipns/example.eth/<repo>:<tag>.
+      IMPORT_PUBLISHER: ${IPCR_IMPORT_PUBLISHER:-}
       IMPORT_INTERVAL: 60s
       STATE_DIR: /data/state
     volumes:
@@ -73,7 +77,7 @@ services:
   # ── Stock nerdctl IPFS registry ─────────────────────────────────────────────
   # `nerdctl ipfs registry serve`, unmodified: translates the registry API into IPFS reads.
   ipcr-registry:
-    image: ghcr.io/yundera/ipcr:1.1.0
+    image: ghcr.io/yundera/ipcr:1.2.0
     container_name: ipcr-registry
     # Root because nerdctl run as any other uid assumes rootless mode and refuses to start
     # without a rootless containerd — which `ipfs registry serve` never uses. The service has

@@ -597,6 +597,10 @@ func announce(ctx context.Context, root string) {
 // repositories named in IMPORT_REPOS), publishing each as /ipns/<key>/<tag>, where <key> is the
 // repository path with "/" → "-". A tag is re-imported when its manifest digest changes, which is
 // how a moving tag like `latest` follows the registry.
+//
+// With IMPORT_PUBLISHER=<key name>, every repository is published under that one key instead, as
+// /ipns/<key>/<repo>/<tag>: one name for all the images, which a DNSLink domain or an ENS name
+// can point at (ipcr.localhost:4767/ipns/example.eth/<repo>:<tag>).
 func watch(ctx context.Context, registryURL string, every time.Duration, stateDir string) {
 	u, err := url.Parse(registryURL)
 	if err != nil || u.Host == "" {
@@ -628,7 +632,11 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 			log.Printf("watch: save %s: %v", filepath.Base(path), err)
 		}
 	}
+	publisher := os.Getenv("IMPORT_PUBLISHER")
 	log.Printf("watch: %s every %s", registryURL, every)
+	if publisher != "" {
+		log.Printf("watch: publishing every repository under the IPNS key %q", publisher)
+	}
 	for {
 		// A fresh client each pass: credentials are re-read (a token written or rotated by an
 		// install step is picked up) and cached bearer tokens never outlive their expiry.
@@ -652,13 +660,24 @@ func watch(ctx context.Context, registryURL string, every time.Duration, stateDi
 					continue
 				}
 				key := repo + ":" + tag
+				if publisher != "" {
+					// Its own entries, so that turning publisher mode on publishes what is there.
+					key = publisher + "|" + key
+				}
 				if state[key] == dgst && pub.has(repo, tag) {
 					continue
 				}
 				root, err := importFrom(ctx, reg, repo, dgst)
 				if err == nil {
 					var name string
-					name, err = tagImage(ctx, strings.ReplaceAll(repo, "/", "-"), tag, root)
+					if publisher != "" {
+						name, err = publishImage(ctx, publisher, repo, tag, root)
+						if err == nil {
+							pub.Publisher, _, _ = strings.Cut(name, "/")
+						}
+					} else {
+						name, err = tagImage(ctx, strings.ReplaceAll(repo, "/", "-"), tag, root)
+					}
 					if err == nil {
 						log.Printf("watch: %s:%s → ipcr.localhost:4767/ipns/%s:%s (/ipfs/%s)", repo, tag, name, tag, root)
 						pub.set(repo, name, tag, publishedTag{CID: root, Digest: dgst, At: time.Now().UTC().Format(time.RFC3339)})
@@ -693,8 +712,10 @@ type publishedRepo struct {
 }
 
 type published struct {
-	Registry string                    `json:"registry"`
-	Images   map[string]*publishedRepo `json:"images"`
+	Registry string `json:"registry"`
+	// The IPNS name of the IMPORT_PUBLISHER key, when set: what a DNSLink or ENS record points at.
+	Publisher string                    `json:"publisher,omitempty"`
+	Images    map[string]*publishedRepo `json:"images"`
 }
 
 func (p *published) has(repo, tag string) bool {

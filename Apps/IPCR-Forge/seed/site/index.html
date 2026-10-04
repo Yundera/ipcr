@@ -8,8 +8,9 @@
 <!--
   Plain file, deliberately not a Maison .tmpl: it contains no dollar-brace sequence, and every
   address is derived in the browser from this page's own hostname (ipcr-forge-<domain> →
-  radicle-<domain>, gitea-<domain>), so the nip.io / sslip.io aliases work too.
-  Live data: /images.json (IPCR's published.json) and the Radicle API's node info.
+  radicle-<domain>, radicle-api-<domain>), so the nip.io / sslip.io aliases work too.
+  Live data: /images.json (IPCR's published.json), /ci/ (the CI broker's report pages) and the
+  Radicle API's node info.
 -->
 <style>
   :root {
@@ -78,11 +79,12 @@
   </div>
 </header>
 <p class="lede">From <code>git push</code> to <code>docker pull</code> on any server, without a central
-service. Code lives on Radicle, Gitea Actions builds it, and IPCR serves the image from IPFS.</p>
+service. Code lives on Radicle, this node builds it with GitHub-style workflows, and IPCR serves
+the image from IPFS.</p>
 
 <div class="cards">
   <a class="card" id="link-radicle" href="#"><b>Radicle</b><span>Browse repositories, issues and patches. Public.</span></a>
-  <a class="card" id="link-gitea" href="#"><b>Gitea</b><span>Builds, logs and the staging registry. Sign in as <code>gitea_admin</code>.</span></a>
+  <a class="card" href="ci/"><b>CI runs</b><span>Every build this node ran, with its log and result. Public.</span></a>
   <a class="card" href="#images"><b>Published images</b><span>What this server serves from IPFS, with the line to put in a compose file.</span></a>
 </div>
 
@@ -90,17 +92,22 @@ service. Code lives on Radicle, Gitea Actions builds it, and IPCR serves the ima
 <div class="pipe">
   <div class="step"><b>1 · Push</b><small><code>git push rad</code> a <code>v*</code> tag to the Radicle network</small></div>
   <div class="arrow">→</div>
-  <div class="step"><b>2 · Bridge</b><small>repos with <code>.gitea/workflows/</code> are copied into Gitea</small></div>
+  <div class="step"><b>2 · Trigger</b><small>this node receives the tag and the Radicle CI broker picks it up</small></div>
   <div class="arrow">→</div>
-  <div class="step"><b>3 · Build</b><small>Gitea Actions builds the image into Gitea's registry</small></div>
+  <div class="step"><b>3 · Build</b><small><code>act</code> runs the repo's <code>.github/workflows/</code> and pushes the image</small></div>
   <div class="arrow">→</div>
   <div class="step"><b>4 · IPFS</b><small>IPCR imports each tag and publishes it under an IPNS name</small></div>
   <div class="arrow">→</div>
   <div class="step"><b>5 · Pull</b><small>any server with IPCR: <code>ipcr.localhost:4767/ipns/…</code></small></div>
 </div>
 <p>Steps 2 to 4 are automatic and usually take a few minutes. The very first build on this server
-takes longer (about 5 to 10 minutes) while the runner downloads its build images. A repository
-needs no configuration beyond committing a workflow.</p>
+takes longer (about 5 to 10 minutes) while it downloads its build images. A repository needs no
+configuration beyond committing a workflow. There is no second copy of it anywhere: the build
+reads the commit straight from this node. Builds of the default branch and of patches also
+write their result back into the repository, signed by the node, as a Radicle job.</p>
+<p class="note">Only changes signed by one of the repository's delegates are built: release tags,
+the default branch and their patches. A build can publish an image, so it gets the trust of a
+release.</p>
 
 <h2 id="images">Published images</h2>
 <div id="images-body"><p class="muted">Loading…</p></div>
@@ -124,10 +131,13 @@ rad init</code></pre>
     It ends with <code>✗ Target not met: could not fetch from […]</code>. That is about the public
     Radicle seeds, not this server, and can be ignored. The repository is in place once it shows
     in the <a class="radicle-link" href="#">Radicle explorer</a>.</li>
-  <li><b>Add a workflow</b> at <code>.gitea/workflows/build.yml</code>. This one builds the
-    <code>Dockerfile</code> at the root and publishes it for every <code>v*</code> tag. The
-    <code>REGISTRY_TOKEN</code> secret is already set for every repository. Commit it
-    (<code>git add .gitea &amp;&amp; git commit -m "Build the image"</code>).
+  <li><b>Add a workflow</b> at <code>.github/workflows/build.yml</code>, as on GitHub. This one
+    builds the <code>Dockerfile</code> at the root and publishes it for every <code>v*</code> tag.
+    <code>vars.IMAGE</code> is set for every repository (this node's staging registry plus the
+    repository's name); there is no secret to configure. Two lines differ from a GitHub-hosted
+    workflow: <code>context: .</code> (builds the checkout, not a GitHub URL) and buildx's
+    <code>network=host</code> (so its builder can reach the staging registry). Commit it
+    (<code>git add .github &amp;&amp; git commit -m "Build the image"</code>).
 <pre><code>on:
   push:
     tags: ['v*']
@@ -136,32 +146,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Registry address
-        id: registry
-        run: echo "host=&#36;{GITHUB_SERVER_URL#https://}" &gt;&gt; "&#36;GITHUB_OUTPUT"
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: &#36;{{ steps.registry.outputs.host }}/&#36;{{ github.repository }}
+          images: &#36;{{ vars.IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
         with:
-          registry: &#36;{{ steps.registry.outputs.host }}
-          username: &#36;{{ github.repository_owner }}
-          password: &#36;{{ secrets.REGISTRY_TOKEN }}
+          driver-opts: network=host
       - uses: docker/build-push-action@v6
         with:
+          context: .
           push: true
           tags: &#36;{{ steps.meta.outputs.tags }}
           labels: &#36;{{ steps.meta.outputs.labels }}</code></pre></li>
   <li><b>Release:</b>
-<pre><code>git tag v1.0.0
+<pre><code>git tag -a v1.0.0 -m v1.0.0
 git push rad main v1.0.0</code></pre>
-    Follow the build in Gitea under <code>gitea_admin/&lt;repo&gt;</code> → Actions. A minute after
-    it finishes, the tag appears under <a href="#images">Published images</a>.</li>
+    Follow the build under <a href="ci/">CI runs</a>. A minute after it finishes, the tag appears
+    under <a href="#images">Published images</a>.</li>
 </ol>
 
 <h2 id="use">Use an image</h2>
@@ -173,9 +178,17 @@ server and on any server running IPCR:</p>
     # image: ipcr.localhost:4767/ipfs/bafkrei…           # a CID: this exact image, forever</code></pre>
 <p><code>/ipns/&lt;name&gt;:&lt;tag&gt;</code> is a name the publisher can move to a new build.
 <code>/ipfs/&lt;cid&gt;</code> is the image's content address and can never change.</p>
-<p class="note">For a readable name, add a DNS TXT record <code>_dnslink.example.com</code> =
-<code>dnslink=/ipns/k51…</code> to a domain you own. The image is then
-<code>ipcr.localhost:4767/ipns/example.com:1.0.0</code>.</p>
+<p class="note">For a readable name, point a name you own at this forge's publisher name
+(<code id="publisher-name">k51…</code>), which holds every image it builds:</p>
+<ul>
+  <li><b>ENS:</b> set the content hash of <code>example.eth</code> to
+    <code>ipns://<span class="publisher">k51…</span></code> (one transaction, once). Images are then
+    <code>ipcr.localhost:4767/ipns/example.eth/&lt;repo&gt;:1.0.0</code>.</li>
+  <li><b>DNS:</b> add a TXT record <code>_dnslink.example.com</code> =
+    <code>dnslink=/ipns/<span class="publisher">k51…</span></code>. Images are then
+    <code>ipcr.localhost:4767/ipns/example.com/&lt;repo&gt;:1.0.0</code>.</li>
+</ul>
+<p class="muted">New releases need no change to either record: they update the publisher name.</p>
 
 <h2 id="install">Pull from another server</h2>
 <p>Any server with IPCR resolves the same lines and fetches the image from the IPFS network,
@@ -199,12 +212,12 @@ for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blan
   <tr><th>Address</th><th>What</th></tr>
   <tr><td><a id="t-radicle" href="#"></a></td><td>Radicle explorer (public)</td></tr>
   <tr><td><a id="t-radicle-api" href="#"></a></td><td>Radicle API and read-only git over HTTPS (public)</td></tr>
-  <tr><td><a id="t-gitea" href="#"></a></td><td>Gitea: builds, logs, staging registry</td></tr>
+  <tr><td><a href="ci/">ipcr-forge-…/ci/</a></td><td>CI runs and their logs (public)</td></tr>
   <tr><td><code>ipcr.localhost:4767</code></td><td>IPCR registry, for this server's Docker only</td></tr>
   <tr><td>TCP 8776 · TCP/UDP 4768</td><td>Radicle peers · IPFS peers</td></tr>
 </table></div>
 
-<footer>IPCR Forge · Radicle · Gitea · Kubo · nerdctl · <a href="https://github.com/Yundera/ipcr" target="_blank" rel="noopener">IPCR</a></footer>
+<footer>IPCR Forge · Radicle · Radicle CI broker · act · Kubo · nerdctl · <a href="https://github.com/Yundera/ipcr" target="_blank" rel="noopener">IPCR</a></footer>
 </main>
 
 <script>
@@ -222,10 +235,8 @@ for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blan
   document.getElementById("host").textContent = base || host;
   setLink("link-radicle", "radicle");
   Array.prototype.forEach.call(document.querySelectorAll("a.radicle-link"), function (a) { a.href = url("radicle"); });
-  setLink("link-gitea", "gitea");
   setLink("t-radicle", "radicle", true);
   setLink("t-radicle-api", "radicle-api", true);
-  setLink("t-gitea", "gitea", true);
 
   function el(tag, text, cls) {
     var e = document.createElement(tag);
@@ -262,12 +273,16 @@ for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blan
     .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function (pub) {
       var reg = pub.registry || "ipcr.localhost:4767";
+      if (pub.publisher) {
+        document.getElementById("publisher-name").textContent = pub.publisher;
+        Array.prototype.forEach.call(document.querySelectorAll("span.publisher"), function (e) { e.textContent = pub.publisher; });
+      }
       var repos = Object.keys(pub.images || {}).sort();
       if (!repos.length) throw new Error("empty");
       body.textContent = "";
       repos.forEach(function (repo) {
         var r = pub.images[repo];
-        body.appendChild(el("h3", repo.replace(/^gitea_admin\//, "")));
+        body.appendChild(el("h3", repo));
         var wrap = el("div", null, "scroll");
         var t = el("table");
         var head = el("tr");
