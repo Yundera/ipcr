@@ -331,7 +331,7 @@ services:
   # Verbatim from Apps/Radicle-Gitea-Bridge; only its data folder moves to $AppID/bridge/.
 
   radicle-gitea-bridge:
-    image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
+    image: ghcr.io/worph/radicle-gitea-bridge:1.0.0
     container_name: radicle-gitea-bridge
     user: $PUID:$PGID
     # Reads two HTTP APIs and runs git. Needs no capability at all.
@@ -386,6 +386,11 @@ services:
     user: "0:0"
     # Root needs no capabilities to write root-owned files it owns; drop them all.
     cap_drop: [ALL]
+    # Forge only: one back, read-only. The import token below is written by bridge-credentials as
+    # $PUID, mode 0600, in a 0700 folder; a root with no capabilities is bound by those modes like
+    # anyone else (verified: "permission denied"). DAC_READ_SEARCH bypasses read and search checks
+    # only, never write, and only on what this container mounts. See rationale.md.
+    cap_add: [DAC_READ_SEARCH]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     command: ["gateway"]
@@ -757,7 +762,7 @@ x-compose-app:
           chmod 600 /runner/token
       when: absent:/DATA/AppData/$AppID/gitea/runner/.runner
     - name: bridge-credentials
-      image: ghcr.io/worph/radicle-gitea-bridge:0.1.0
+      image: ghcr.io/worph/radicle-gitea-bridge:1.0.0
       user: $PUID:$PGID
       phase: post_up
       network: $APP_NET

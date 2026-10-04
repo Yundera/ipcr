@@ -25,6 +25,8 @@ bundle adds.
 3. **A public landing page.** `ipcr-forge-<domain>` is not behind the SSO gate.
 4. **It replaces four apps** and cannot be installed beside them: same container names,
    domains and host ports.
+5. **One added capability.** `ipcr-gateway` gets `cap_add: [DAC_READ_SEARCH]` on top of the
+   standalone listing's `cap_drop: [ALL]`.
 
 ## Why it is necessary
 
@@ -55,7 +57,20 @@ Renaming every container, domain and port to coexist would break the defaults th
 and IPCR rely on (`radicle-api:8080`, `gitea:3000`) and the documented addresses users type,
 for no use case: running two copies of the same forge on one server.
 
+**5. `DAC_READ_SEARCH`.** The gateway runs as root (for the CA it drops into the host's Docker
+trust store) with every capability dropped, and a root with no capabilities is bound by file
+modes like any other user. The import token is written by the bridge's install step as `$PUID`,
+mode `0600`, in a `0700` folder, so without the capability the gateway cannot open it (verified
+on a fresh install: `open /data/secrets/registry-auth: permission denied`, then `401` from
+Gitea). `DAC_READ_SEARCH` restores exactly the missing half: reading files and traversing
+directories regardless of their modes.
+
 ## Security mitigations in place
+
+- **The added capability is read-only and narrow.** `DAC_READ_SEARCH` bypasses read and
+  directory-search checks only. It grants no write, ownership or privilege change, and reaches
+  only what the gateway mounts: its own TLS folder and state, the token (mounted read-only) and
+  the Docker trust store it already writes to.
 
 - **The network link is narrow.** `gitea-internal` holds only `gitea`, `gitea-runner` and now
   `ipcr-gateway`. The gateway's only listener is the read-only registry API. Kubo's
