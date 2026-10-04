@@ -77,9 +77,18 @@ Rules that follow:
 - **One writer.** Two machines publishing the same key overwrite each other: the record with the
   higher sequence number wins, and the other's tag is silently lost. CI may build anywhere, but
   one node should publish. `ipcrd` serialises its own updates.
-- **Liveness.** Kubo signs records for 48 h and re-signs them every few hours while the key holder
-  is online. If the holder is offline longer, the name stops resolving, even though the images
-  stay fetchable by CID wherever they are pinned.
+- **Liveness.** A record is valid for its *lifetime*, and the key holder re-signs it every 4 h while
+  online. Kubo's default lifetime is 48 h. IPCR publishes with `IPNS_LIFETIME` (7 days in the
+  apps) and sets Kubo's `Ipns.RecordLifetime` to match, so its republisher keeps 7 days. Past the
+  lifetime, the name stops resolving, though the images stay fetchable by CID wherever they are
+  pinned. DHT nodes drop any record after 36 h whatever its lifetime, so a long lifetime helps
+  caches and third-party republishers, not the DHT itself. The record's TTL (`IPNS_TTL`, 5 min) is
+  how long resolvers cache it: how quickly a moved tag is seen.
+- **The key is the name.** It exists only in that node's Kubo keystore. Back it up: IPCR Forge's
+  admin page exports it encrypted ([forge.md](forge.md#admin)).
+- **Restoring a key on another node needs a higher sequence number.** Kubo only knows its own
+  sequence, and the network keeps the record with the highest one. A restore therefore publishes
+  at `max(network, local) + 1`, and refuses when it cannot read the network.
 
 ## Options studied, not built
 

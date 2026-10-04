@@ -96,14 +96,55 @@ code checks visibility again anyway.
 - **Radicle signatures mean "this forge published it"**, not "this developer wrote it". Radicle is a
   distribution channel here, not the trust root. The `/rad/<rid>/…` image-naming idea in
   [naming.md](naming.md) is weaker for it.
-- **Anyone who can push to a repository can publish images.** A job can push any name to the
-  unauthenticated `localhost:5000`, and IPCR publishes whatever it finds there under the forge's IPNS
-  key, including images built from private repositories. Registration is off, so every user was
-  created by the admin.
+- **Only allowed names are published.** IPCR publishes an image name only if it is on the allowlist
+  the bridge keeps (`IMPORT_ALLOW_REQUIRED`). That list holds the public Gitea repositories, minus
+  those switched off in the admin pages. Images built from private repositories are therefore not
+  published.
+- **What the allowlist does not cover:** a job can still push any name to the unauthenticated
+  `localhost:5000`. So anyone who can push code here can publish under an allowed name.
+  Registration is off, so every user was created by the admin.
 - **Fork pull requests** from users without write access wait for "Approve and run" in Gitea 1.27.
 - The page, the tips and `rationale.md` say all of this plainly.
 - **Follow-up:** per-repository push credentials, with the bridge acting as a registry token
-  server, would tie an image name to its repository.
+  server, would tie each image name to the one repository allowed to build it.
+
+## Admin
+
+`https://ipcr-forge-<domain>/admin`. It is served by the bridge and only lets in Gitea site
+administrators.
+
+**Sign-in.** It uses an OAuth2 app that the `setup` step registers, with one redirect URI per
+host. The flow is the authorization code with PKCE and the `read:user` scope. The bridge reads
+`is_admin` from `/api/v1/user`, drops the Gitea token, and sets its own HMAC-signed session (8 h;
+the key lives in `bridge/state`). Writes require the `X-IPCR-Admin` header and a same-origin
+request.
+
+**Behind the page.** The page calls the bridge, and the bridge calls ipcrd's admin API
+(`gateway/admin.go`). That API listens on `:4769`, on the `ipcr-admin` network (internal, bridge
+and gateway only), and needs a Bearer token from `ipcr/state/admin-token`.
+
+| Section | What it does |
+| --- | --- |
+| Publisher name | The key and its `k51…`. You enter your ENS or DNSLink name; it is checked by resolving it through Kubo. While it points here, pull lines (page and admin) use it. The check runs again every 30 min. |
+| Health | Shows the IPNS record held by this node and the one the network serves (delegated routing): sequence, expiry, whether it is the current tree. "Republish" refreshes it. Also: peers, the addresses the network sees, and storage against `StorageMax`. |
+| Published images | For each tag: "Findable?" (is this node a listed provider), "Announce", "Make latest", "Unpublish". Unpublish removes the tag from the tree, unpins the objects no other image uses, and leaves a tombstone so the tag is not re-imported. Staging tags that are not allowed, or not imported yet, offer "Import now". |
+| Which repositories may publish | One toggle per public repository. These toggles make up IPCR's allowlist. |
+| Key backup | "Download" encrypts the publisher key with a passphrase. "Restore" makes a backup the publisher key: the current key is kept under `<key>-replaced-<time>`, and the new record's sequence is set above both the network's and this node's. |
+
+**Manual restore** without the page:
+```
+ipcrd key decrypt backup.ipcrkey.json > key
+ipfs key import forge key
+```
+Then publish with a sequence number above the network's.
+
+**Backup format** (`gateway/keybackup.go`, copied in `bridge/`):
+- JSON containing PBKDF2-SHA256 (600k iterations) and AES-256-GCM;
+- the additional authenticated data binds the key's name and its `k51…`;
+- the plaintext is exactly what `ipfs key export` writes.
+
+The bridge seals (it can read the keystore) and ipcrd opens, so the cleartext key never crosses the
+network.
 
 ## Workflow contract
 
@@ -159,6 +200,25 @@ New in v3 (tested locally with Gitea 1.27.3 and rad 1.10.1, 2026-10-04):
 14. **Right after `up`, new domains answer with the gateway's SSO redirect** until Caddy picks up the
     labels (about a minute). The runner's registration retries through that window.
 
+15. **`key/export` is CLI-only** in Kubo (`NoRemote`), and ipcrd, which runs as root without
+    capabilities, cannot read the `$PUID` 0700 keystore. The bridge reads `key_<base32 name>`
+    (`forge` → `key_mzxxez3f`, mode 0400) through a read-only mount. Those bytes are what
+    `ipfs key export` would write.
+16. **Delegated routing does not use the spec's 404.** For a name it doesn't know, delegated-ipfs.dev
+    answers `200 text/plain` "delegate error: routing: not found". The first restore read that as
+    "network unreachable" and refused, safely.
+17. **A restore must outbid this node's own record, not only the network's.** Kubo refuses to
+    publish below the sequence it holds. The network showed 3 while Kubo held 5, so the first
+    restore failed. The sequence is now `max(network, local) + 1`.
+18. **Cloudflare replaces a 502's body with its own page.** The admin API reports Kubo errors as
+    500, so the message reaches the page.
+19. **Kubo 0.43 queues provides.** "Announce" returns at once, and the node shows up as a provider
+    on delegated routing a minute or two later.
+20. **Republishing an unchanged tree keeps the sequence number** and only extends the expiry. The
+    lifetime went from 48 h to 7 days on the first republish.
+21. **Gitea skips its consent screen only after a first grant,** even with
+    `skip_secondary_authorization`. Each admin clicks "Authorize" once.
+
 ## Verified
 
 **Locally** (Gitea 1.27.3-rootless, `radicle-seed-node` 1.10.1, the bridge image, one Docker network):
@@ -181,13 +241,31 @@ New in v3 (tested locally with Gitea 1.27.3 and rad 1.10.1, 2026-10-04):
 | `docker pull` of that name, then `docker run` | page served (`Hello from IPFS`) |
 | forge page `ipcr-forge-holyhorse.nsl.sh` | 200; `/images.json` and `/repos.json` filled |
 
+**Admin, on holyhorse** (ipcr 1.3.0, bridge 0.2.0, 2026-10-04):
+
+| Check | Result |
+| --- | --- |
+| Login as `gitea_admin` / as a non-admin user | session and page / 403 |
+| Writes without `X-IPCR-Admin`, or from another origin | 403; the admin API without a token, also from the CI network: 401 |
+| Status | local and network record agree; republish → expiry 7 days out; 18 peers |
+| `ipcr-hello` root findable | after "Announce": this node listed by delegated-ipfs.dev |
+| `metadec.eth` | "points elsewhere" (it is wisera's), with the value to set |
+| Repository switched off, tag `v1.0.2` built | stays in staging, not published; switched on → imported, then deleted from staging |
+| `latest` → `1.0.1`, unpublish `1.0.2` | resolves accordingly; `1.0.2` gone for Docker, its objects unpinned, not re-imported |
+| Key export → `ipcrd key decrypt` | byte-identical to `key_mzxxez3f`, same `k51…` |
+| Restore a throwaway key, then the original | name switches and pulls under each; original back with sequence 7 (network had 5); kept copy reused, no duplicate key |
+| `forge-registry` restart | garbage collection frees the deleted tags' blobs |
+
 ## Open items
 
 - **Pull from a second server.** Verified on holyhorse itself only; v2's images pulled across
   servers the same way.
-- **Publish the images**: `ghcr.io/yundera/ipcr:1.2.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.1.0`
-  (workflows `image.yml` and `bridge.yml`, tag `bridge-v0.1.0`).
-- **Per-repository image names:** the bridge as a registry token server (see Trust).
+- **Publish the images**: `ghcr.io/yundera/ipcr:1.3.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.2.0`
+  (workflows `image.yml` and `bridge.yml`, tags `v1.3.0` and `bridge-v0.2.0`).
+- **Image provenance:** the bridge as a registry token server, so only a repository's own CI can
+  push its name (see Trust).
+- **Old keys:** `<key>-replaced-*` keys are kept forever, and Kubo keeps republishing them. A
+  "delete" in the admin page, once the new key is confirmed.
 - **act_runner** is pinned at 0.6.1, proven with Gitea 1.27.3. Upstream has moved on.
 - **Radicle → Gitea:** patches opened on Radicle could become pull requests. Not built.
 - **Store install:** test through the store, not only as a hand install.

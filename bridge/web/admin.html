@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPCR Forge admin</title>
+<link rel="icon" href="icon.png">
+<!--
+  The forge's admin page: Gitea site administrators only (the bridge checks the session for the
+  page and for every API call). Everything goes through /admin/api/: the bridge's own endpoints
+  (repositories, key export) and IPCR's admin API behind /admin/api/ipcr/.
+-->
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --ink: #0f172a; --muted: #5b6475; --line: #e3e7ee;
+    --accent: #0f766e; --code: #f1f4f8; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b1220; --card: #111a2c; --ink: #e5e9f0; --muted: #94a0b5; --line: #1f2a40;
+      --accent: #2dd4bf; --code: #0d1626; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; gap: 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  header .title { display: flex; gap: 12px; align-items: center; }
+  header img { width: 40px; height: 40px; }
+  h1 { font-size: 24px; margin: 0; }
+  h2 { font-size: 19px; margin: 32px 0 10px; }
+  h3 { font-size: 15px; margin: 14px 0 6px; }
+  p { margin: 6px 0; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  .card h3 { margin-top: 0; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; background: var(--code);
+    padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  .ok { color: var(--ok); font-weight: 600; } .warn { color: var(--warn); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; }
+  button, input[type=submit] { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px;
+    font: inherit; font-size: 13px; padding: 4px 10px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=password], input[type=number], input[type=file] { font: inherit; font-size: 14px; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); max-width: 100%; }
+  form.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; }
+  .scroll { overflow-x: auto; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .bar { height: 8px; background: var(--code); border-radius: 4px; overflow: hidden; margin: 6px 0; }
+  .bar span { display: block; height: 100%; background: var(--accent); }
+  .note { border-left: 3px solid var(--warn); padding: 4px 12px; color: var(--muted); margin: 8px 0; }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+    padding: 8px 14px; border-radius: 8px; font-size: 14px; display: none; max-width: calc(100% - 32px); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="title"><img src="icon.png" alt=""><div><h1>IPCR Forge admin</h1>
+    <div class="muted"><a href="/">Forge page</a> · signed in as <b id="me">…</b></div></div></div>
+  <button id="logout">Sign out</button>
+</header>
+
+<h2>Publisher name</h2>
+<div class="grid">
+  <div class="card">
+    <h3>Key</h3>
+    <dl>
+      <dt>Key</dt><dd><code id="key-name">…</code></dd>
+      <dt>IPNS name</dt><dd><code id="key-id">…</code></dd>
+      <dt>Pull as</dt><dd><code id="pull-as">…</code></dd>
+    </dl>
+    <p class="muted">Every image is published under this one name. Back the key up (below): it exists only on this server.</p>
+  </div>
+  <div class="card">
+    <h3>Your domain or ENS name</h3>
+    <p class="muted">Point a name you own at the IPNS name, then enter it here. Once it checks out, pull lines use it.</p>
+    <form class="row" id="name-form">
+      <input type="text" id="name" placeholder="example.eth or example.com" size="26" autocomplete="off">
+      <input type="submit" value="Save and check">
+    </form>
+    <p id="name-check" class="muted"></p>
+    <details><summary class="muted">How to point it here</summary>
+      <p><b>ENS:</b> in the ENS manager, Records → Content hash = <code>ipns://<span class="kid">k51…</span></code>.</p>
+      <p><b>DNS:</b> a TXT record <code>_dnslink.example.com</code> = <code>dnslink=/ipns/<span class="kid">k51…</span></code>.</p>
+    </details>
+  </div>
+</div>
+
+<h2>Health <button id="refresh">Check again</button></h2>
+<div class="grid">
+  <div class="card">
+    <h3>IPNS record</h3>
+    <dl id="record"></dl>
+    <div class="actions" style="margin-top:8px"><button id="republish">Republish now</button></div>
+    <p class="muted">The record must be renewed by this node while it is online (Kubo does it every 4 h). Lifetime is how long a
+      record stays valid if this node goes offline; TTL is how long resolvers cache it.</p>
+  </div>
+  <div class="card">
+    <h3>Node</h3>
+    <dl id="node"></dl>
+    <div class="actions" style="margin-top:8px"><button id="peers">What the network sees</button></div>
+    <div id="peers-out" class="muted"></div>
+  </div>
+  <div class="card">
+    <h3>Storage</h3>
+    <div id="storage"></div>
+    <p class="muted">Published images are pinned and never collected. Unpublishing an image frees the blocks no other image uses.</p>
+  </div>
+</div>
+
+<h2>Published images</h2>
+<div id="images" class="muted">Loading…</div>
+
+<h2>Which repositories may publish</h2>
+<p class="muted">A build can push any image name to the staging registry; IPCR only publishes the names of the public
+  Gitea repositories switched on here (<code>&lt;owner&gt;/&lt;repo&gt;</code>). New public repositories are on.</p>
+<div id="repos" class="muted">Loading…</div>
+
+<h2>Key backup</h2>
+<div class="grid">
+  <div class="card">
+    <h3>Download a backup</h3>
+    <p class="muted">The key, encrypted with your passphrase (at least 12 characters). Keep the file and the passphrase apart.
+      Without a backup, losing this server loses the name for good.</p>
+    <form class="row" id="export-form">
+      <input type="password" id="ex-pass" placeholder="passphrase" autocomplete="new-password" required>
+      <input type="password" id="ex-pass2" placeholder="again" autocomplete="new-password" required>
+      <input type="submit" value="Download">
+    </form>
+  </div>
+  <div class="card">
+    <h3>Restore a backup</h3>
+    <p class="muted">Makes the backed-up key this forge's publisher key: to move a forge to a new server, or recover one.
+      The current key is kept (renamed), not deleted.</p>
+    <form class="row" id="import-form">
+      <input type="file" id="im-file" accept=".json,application/json" required>
+      <input type="password" id="im-pass" placeholder="passphrase" autocomplete="off" required>
+      <input type="number" id="im-seq" placeholder="sequence (only if asked)" min="1">
+      <input type="submit" value="Restore">
+    </form>
+    <p class="note">Every image name then points at this server's images under the restored name. On a fresh server, the
+      name's last published images are adopted.</p>
+  </div>
+</div>
+</main>
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var publisher = "", pubName = "";
+
+  function toast(msg, ms) {
+    var t = $("toast"); t.textContent = msg; t.style.display = "block";
+    clearTimeout(toast.t); toast.t = setTimeout(function () { t.style.display = "none"; }, ms || 4000);
+  }
+  // Every call: same origin, with the header the bridge requires on writes.
+  function api(method, path, body) {
+    var opt = { method: method, headers: { "X-IPCR-Admin": "1" }, credentials: "same-origin", cache: "no-store" };
+    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    return fetch("/admin/api/" + path, opt).then(function (r) {
+      if (r.status === 401) { location.href = "/admin/login"; throw new Error("signed out"); }
+      return r.text().then(function (t) {
+        var j = null; try { j = JSON.parse(t); } catch (e) {}
+        if (!r.ok) throw new Error((j && j.error) || t || r.statusText);
+        return j;
+      });
+    });
+  }
+  function el(tag, text, cls) { var e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
+  function dl(target, rows) {
+    target.textContent = "";
+    rows.forEach(function (r) {
+      target.appendChild(el("dt", r[0]));
+      var dd = el("dd");
+      if (r[1] instanceof Node) dd.appendChild(r[1]); else dd.textContent = r[1] == null ? "—" : r[1];
+      target.appendChild(dd);
+    });
+  }
+  function badge(text, cls) { return el("span", text, cls); }
+  function size(n) {
+    if (!n) return "0";
+    var u = ["B", "KB", "MB", "GB", "TB"], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i ? 1 : 0) + " " + u[i];
+  }
+  function until(iso) {
+    if (!iso) return "";
+    var h = (Date.parse(iso) - Date.now()) / 3600000;
+    if (h < 0) return "expired";
+    return h > 48 ? Math.round(h / 24) + " days left" : Math.round(h) + " h left";
+  }
+  function busy(btn, p) {
+    btn.disabled = true;
+    return p.then(function (v) { btn.disabled = false; return v; }, function (e) { btn.disabled = false; toast(e.message, 8000); throw e; });
+  }
+
+  api("GET", "me").then(function (me) { $("me").textContent = me.user; });
+  $("logout").onclick = function () {
+    fetch("/admin/logout", { method: "POST", headers: { "X-IPCR-Admin": "1" }, credentials: "same-origin" })
+      .then(function () { location.href = "/"; });
+  };
+
+  // ---- status
+  function recordView(r, err, tree) {
+    if (!r) return badge(err || "none", "bad");
+    var s = el("span");
+    s.appendChild(badge(r.valid ? "valid" : "invalid", r.valid ? "ok" : "bad"));
+    s.appendChild(document.createTextNode(" · sequence " + r.sequence + " · " + until(r.validity)));
+    if (tree && r.value !== tree) { s.appendChild(document.createTextNode(" · ")); s.appendChild(badge("older tree", "warn")); }
+    return s;
+  }
+  function loadStatus(refresh) {
+    return api("GET", "ipcr/status" + (refresh ? "?refresh=1" : "")).then(function (s) {
+      publisher = s.key.id || "";
+      $("key-name").textContent = s.key.name || "—";
+      $("key-id").textContent = publisher || "not created yet (first import creates it)";
+      Array.prototype.forEach.call(document.querySelectorAll(".kid"), function (e) { e.textContent = publisher || "k51…"; });
+      pubName = s.name && s.name.ok ? s.name.name : "";
+      $("pull-as").textContent = "ipcr.localhost:4767/ipns/" + (pubName || publisher || "…") + "/<owner>/<repo>:<tag>";
+      if (s.name && s.name.name) $("name").value = s.name.name;
+      var nc = $("name-check"); nc.textContent = "";
+      if (s.name && s.name.name) {
+        nc.appendChild(s.name.ok ? badge("✓ " + s.name.name + " → this forge", "ok") : badge("✗ " + (s.name.error || "does not resolve"), "bad"));
+        if (!s.name.ok && s.name.resolves) nc.appendChild(el("div", "resolves to " + s.name.resolves, "muted"));
+      } else nc.textContent = "No name set: pull lines use the IPNS name.";
+      var rec = s.record;
+      dl($("record"), [
+        ["Here", recordView(rec.local, rec.localError, rec.tree)],
+        ["Network", recordView(rec.network, rec.networkError, rec.tree)],
+        ["Lifetime", rec.lifetime], ["TTL", rec.ttl],
+        ["Checked", s.checkedAt.replace("T", " ").replace("Z", " UTC")]
+      ]);
+      dl($("node"), [["Peer ID", s.node.id], ["Connected peers", s.node.peers],
+        ["Listening", (s.node.addresses || []).filter(function (a) { return a.indexOf("/127.") < 0 && a.indexOf("/::1/") < 0; }).slice(0, 4).join("\n")]]);
+      var st = s.storage, pct = st.storageMax ? Math.min(100, 100 * st.repoSize / st.storageMax) : 0;
+      $("storage").innerHTML = "";
+      $("storage").appendChild(el("div", size(st.repoSize) + " of " + size(st.storageMax) + " · " + st.pins + " pins"));
+      var bar = el("div", null, "bar"), fill = el("span"); fill.style.width = pct.toFixed(1) + "%"; bar.appendChild(fill);
+      $("storage").appendChild(bar);
+    }).catch(function (e) { toast("Status: " + e.message, 8000); });
+  }
+  $("refresh").onclick = function () { busy(this, loadStatus(true)); };
+  $("republish").onclick = function () {
+    busy(this, api("POST", "ipcr/republish")).then(function () { toast("Published again"); loadStatus(true); });
+  };
+  $("peers").onclick = function () {
+    busy(this, api("GET", "ipcr/peers")).then(function (p) {
+      var o = $("peers-out"); o.textContent = "";
+      if (p.error) o.appendChild(badge(p.error, "bad"));
+      else if (!p.network || !p.network.length) o.appendChild(badge("The network does not know this node's addresses yet: check that port 4768 (TCP and UDP) is reachable.", "warn"));
+      else { o.appendChild(badge("Reachable via:", "ok")); o.appendChild(el("pre", p.network.join("\n"))); }
+    });
+  };
+  $("name-form").onsubmit = function (e) {
+    e.preventDefault();
+    var btn = this.querySelector("input[type=submit]");
+    busy(btn, api("PATCH", "ipcr/config", { name: $("name").value })).then(function () { return loadStatus(true); });
+  };
+
+  // ---- images
+  function loadImages() {
+    return api("GET", "ipcr/images").then(function (d) {
+      var box = $("images"); box.textContent = ""; box.className = "";
+      if (d.stagingError) box.appendChild(el("p", "Staging registry: " + d.stagingError, "warn"));
+      if (!d.images || !d.images.length) { box.appendChild(el("p", "Nothing published yet.", "muted")); return; }
+      d.images.forEach(function (img) {
+        var h = el("h3", img.repo + " ");
+        h.appendChild(img.allowed ? badge("publishing", "ok") : badge("not allowed: new tags are not published", "warn"));
+        box.appendChild(h);
+        var wrap = el("div", null, "scroll"), t = el("table"), head = el("tr");
+        ["Tag", "Image", "", ""].forEach(function (x) { head.appendChild(el("th", x)); });
+        t.appendChild(head);
+        img.tags.forEach(function (tg) {
+          var tr = el("tr");
+          var td1 = el("td"); td1.appendChild(el("code", tg.tag));
+          if (tg.at) td1.appendChild(el("div", tg.at.replace("T", " ").replace("Z", ""), "muted"));
+          var td2 = el("td"); td2.appendChild(el("code", "/ipfs/" + tg.cid));
+          var td3 = el("td"), prov = el("span", "", "muted"); td3.appendChild(prov);
+          var td4 = el("td"), acts = el("div", null, "actions");
+          var chk = el("button", "Findable?");
+          chk.onclick = function () {
+            busy(chk, api("GET", "ipcr/providers?cid=" + encodeURIComponent(tg.cid))).then(function (p) {
+              prov.textContent = "";
+              prov.appendChild(p.self ? badge("✓ this node is listed", "ok") : badge("✗ not listed (" + p.providers + " other providers)", "warn"));
+              if (!p.self) {
+                var ann = el("button", "Announce");
+                ann.onclick = function () { busy(ann, api("POST", "ipcr/announce", { cid: tg.cid })).then(function () { toast("Queued: Kubo announces it within a minute or two; check again then.", 6000); }); };
+                prov.appendChild(document.createTextNode(" ")); prov.appendChild(ann);
+              }
+            });
+          };
+          acts.appendChild(chk);
+          if (tg.tag !== "latest") {
+            var lat = el("button", "Make latest");
+            lat.onclick = function () {
+              busy(lat, api("POST", "ipcr/retag", { repo: img.repo, tag: "latest", from: tg.tag })).then(function () { toast(img.repo + ":latest → " + tg.tag); loadImages(); });
+            };
+            acts.appendChild(lat);
+          }
+          var un = el("button", "Unpublish", "danger");
+          un.onclick = function () {
+            if (!confirm("Unpublish " + img.repo + ":" + tg.tag + "?\n\nThe name stops resolving to it. Servers that already pulled it keep their copy, and its CID keeps working wherever it is still pinned.")) return;
+            busy(un, api("POST", "ipcr/unpublish", { repo: img.repo, tag: tg.tag })).then(function (r) {
+              toast("Unpublished (" + r.unpinned + " objects unpinned)"); loadImages(); loadStatus(true);
+            });
+          };
+          acts.appendChild(un);
+          td4.appendChild(acts);
+          [td1, td2, td3, td4].forEach(function (x) { tr.appendChild(x); });
+          t.appendChild(tr);
+        });
+        (img.staging || []).filter(function (s) { return s.state !== "published"; }).forEach(function (s) {
+          var tr = el("tr");
+          var td1 = el("td"); td1.appendChild(el("code", s.tag));
+          var td2 = el("td", s.state === "unpublished" ? "unpublished; still in staging" : (img.allowed ? "in staging, not imported yet" : "in staging, not allowed"), "muted");
+          var td3 = el("td"), td4 = el("td");
+          if (img.allowed) {
+            var re = el("button", s.state === "unpublished" ? "Publish again" : "Import now");
+            re.onclick = function () { busy(re, api("POST", "ipcr/reimport", { repo: img.repo, tag: s.tag })).then(function () { toast("Queued"); setTimeout(loadImages, 5000); }); };
+            td4.appendChild(re);
+          }
+          [td1, td2, td3, td4].forEach(function (x) { tr.appendChild(x); });
+          t.appendChild(tr);
+        });
+        wrap.appendChild(t); box.appendChild(wrap);
+      });
+    }).catch(function (e) { $("images").textContent = "Images: " + e.message; });
+  }
+
+  // ---- repositories
+  function loadRepos() {
+    return api("GET", "repos").then(function (repos) {
+      var box = $("repos"); box.textContent = ""; box.className = "";
+      if (!repos.length) { box.appendChild(el("p", "No public repository yet.", "muted")); return; }
+      var t = el("table"), head = el("tr");
+      ["Repository", "Publish images"].forEach(function (x) { head.appendChild(el("th", x)); });
+      t.appendChild(head);
+      repos.forEach(function (r) {
+        var tr = el("tr"), td1 = el("td"), td2 = el("td"), cb = document.createElement("input");
+        td1.appendChild(el("code", r.full_name));
+        cb.type = "checkbox"; cb.checked = r.publish;
+        cb.onchange = function () {
+          cb.disabled = true;
+          api("PUT", "repos", { full_name: r.full_name, publish: cb.checked })
+            .then(function () { cb.disabled = false; toast(r.full_name + (cb.checked ? ": publishing" : ": not publishing")); loadImages(); },
+                  function (e) { cb.disabled = false; cb.checked = !cb.checked; toast(e.message, 8000); });
+        };
+        td2.appendChild(cb);
+        tr.appendChild(td1); tr.appendChild(td2); t.appendChild(tr);
+      });
+      var wrap = el("div", null, "scroll"); wrap.appendChild(t); box.appendChild(wrap);
+    }).catch(function (e) { $("repos").textContent = "Repositories: " + e.message; });
+  }
+
+  // ---- key backup
+  $("export-form").onsubmit = function (e) {
+    e.preventDefault();
+    var p = $("ex-pass").value;
+    if (p !== $("ex-pass2").value) { toast("The passphrases differ"); return; }
+    if (p.length < 12) { toast("At least 12 characters"); return; }
+    var btn = this.querySelector("input[type=submit]");
+    btn.disabled = true;
+    fetch("/admin/api/key/export", { method: "POST", credentials: "same-origin",
+      headers: { "X-IPCR-Admin": "1", "Content-Type": "application/json" }, body: JSON.stringify({ passphrase: p }) })
+      .then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+        var name = (r.headers.get("Content-Disposition") || "").replace(/.*filename="([^"]+)".*/, "$1") || "publisher.ipcrkey.json";
+        return r.blob().then(function (b) {
+          var a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = name;
+          document.body.appendChild(a); a.click(); a.remove();
+          $("ex-pass").value = $("ex-pass2").value = "";
+          toast("Saved " + name);
+        });
+      })
+      .catch(function (e) { toast(e.message, 8000); })
+      .then(function () { btn.disabled = false; });
+  };
+  $("import-form").onsubmit = function (e) {
+    e.preventDefault();
+    var f = $("im-file").files[0], btn = this.querySelector("input[type=submit]");
+    if (!f) return;
+    f.text().then(function (txt) {
+      var backup; try { backup = JSON.parse(txt); } catch (x) { throw new Error("Not a key backup file"); }
+      if (!confirm("Make " + backup.id + " this forge's publisher key?\n\nThe current key (" + (publisher || "none") + ") is kept, renamed. Pull lines with the current IPNS name stop following new releases.")) return;
+      var body = { backup: backup, passphrase: $("im-pass").value };
+      if ($("im-seq").value) body.sequence = parseInt($("im-seq").value, 10);
+      return busy(btn, api("POST", "ipcr/key/import", body)).then(function (r) {
+        toast(r.status || ("Publisher key is now " + r.id + (r.adopted ? " (network tree adopted)" : "")), 8000);
+        $("im-pass").value = ""; loadStatus(true); loadImages();
+      });
+    }).catch(function (e) { toast(e.message, 8000); });
+  };
+
+  loadStatus(false); loadImages(); loadRepos();
+})();
+</script>
+</body>
+</html>

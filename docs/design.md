@@ -82,6 +82,10 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
 11. **One name for many images.** `/ipns/<name>/<path>:<tag>` and the watcher's publisher mode put
     every image under one IPNS key, which an ENS or DNSLink name can point at once and for all.
     Verified with `metadec.eth`; see [naming.md](naming.md).
+12. **An admin API, not admin features in the registry.** Unpublishing, moving tags, the
+    allowlist, name checks and key restore are served on a separate listener (`ADMIN_LISTEN`), with
+    a Bearer token, for one client: a UI that puts its own login in front (IPCR Forge's bridge). The
+    registry port stays read-only. See [forge.md](forge.md#admin).
 
 ## Open items
 
@@ -94,7 +98,7 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
 - **DNSLink** with a plain DNS domain is untested end to end. ENS (`metadec.eth`) is verified, and
   reaches Kubo as a DNSLink record, so the path is the same.
 - **Cross-host pull of a publisher path.** Verified on the publishing host only; other hosts need
-  ipcr 1.2.0.
+  ipcr 1.2.0 or later.
 - **Podman**: document and test `/etc/containers/certs.d`.
 - **Publishing UX.** `ipcr push` needs the containerd socket (root-equivalent). `ipcr import`
   from a registry does not, and is the preferred path.

@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sign(secret, body string) string {
@@ -195,5 +200,231 @@ func TestWeb(t *testing.T) {
 	}
 	if c, _ := get("/nothing"); c != 404 {
 		t.Errorf("/nothing: %d", c)
+	}
+}
+
+// The same vector as gateway/admin_test.go: a Kubo key and its name, and a backup of it that ipcrd
+// must be able to open.
+const (
+	vectorKey    = "CAESQEgAFnJaC//4NMPXmGjBx4fMcn1cRGFhAV2reN7GqcyS+z5e/JsuHUwhZneaa52YACcp2T6p2ri/FfdyILTLfWo="
+	vectorID     = "k51qzi5uqu5dmg0qkz1yhcmegr2nf4jc7q8v9xw1mqv2p6211xzntxps7n6dm2"
+	vectorPass   = "correct horse battery staple"
+	vectorBackup = `{"v":1,"kdf":"pbkdf2-sha256","iter":600000,"salt":"5mqcBpjiFkE3IVdNeqL6Bw==","nonce":"xKVdz0QswnMpkRz3","name":"forge","id":"k51qzi5uqu5dmg0qkz1yhcmegr2nf4jc7q8v9xw1mqv2p6211xzntxps7n6dm2","format":"libp2p-protobuf-cleartext","ct":"k9Hq6zuS1jmKA13OeIZpGuK4M5pUIKA0F4n0mQrFq5J8E/Q+RlRzu91PoTJGiwR/zUeOG14uO138MG3pPVqTzrFklRcN21yEGyeImaUf0EdWJPUX"}`
+)
+
+func TestKeyBackupVector(t *testing.T) {
+	key, _ := base64.StdEncoding.DecodeString(vectorKey)
+	var fixed keyBackup
+	json.Unmarshal([]byte(vectorBackup), &fixed)
+	if got, err := openKey(&fixed, vectorPass); err != nil || !bytes.Equal(got, key) {
+		t.Fatalf("fixed vector: %v", err)
+	}
+	b, err := sealKey("forge", key, "a passphrase long enough")
+	if err != nil || b.ID != vectorID {
+		t.Fatalf("seal: %v %s", err, b.ID)
+	}
+	if got, err := openKey(b, "a passphrase long enough"); err != nil || !bytes.Equal(got, key) {
+		t.Fatalf("round trip: %v", err)
+	}
+}
+
+func TestKeystoreFile(t *testing.T) {
+	if got := keystoreFile("/ks", "forge"); got != "/ks/key_mzxxez3f" {
+		t.Errorf("forge → %s, want /ks/key_mzxxez3f", got)
+	}
+}
+
+func TestExport(t *testing.T) {
+	dir := t.TempDir()
+	key, _ := base64.StdEncoding.DecodeString(vectorKey)
+	os.WriteFile(keystoreFile(dir, "forge"), key, 0o400)
+	au, _ := newAuth([]string{"ipcr-forge-x.example"}, "http://gitea", dir, filepath.Join(dir, "session-key"))
+	a := &adminAPI{keystore: dir, publisher: "forge", au: au}
+	r := httptest.NewRequest("POST", "/admin/api/key/export", strings.NewReader(`{"passphrase":"long enough passphrase"}`))
+	w := httptest.NewRecorder()
+	a.export(w, r)
+	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Disposition"), ".ipcrkey.json") {
+		t.Fatalf("export: %d %s", w.Code, w.Body)
+	}
+	var b keyBackup
+	json.Unmarshal(w.Body.Bytes(), &b)
+	if got, err := openKey(&b, "long enough passphrase"); err != nil || !bytes.Equal(got, key) || b.ID != vectorID {
+		t.Fatalf("exported backup does not open: %v", err)
+	}
+	w = httptest.NewRecorder()
+	a.export(w, httptest.NewRequest("POST", "/", strings.NewReader(`{"passphrase":"short"}`)))
+	if w.Code != 400 {
+		t.Errorf("short passphrase: %d", w.Code)
+	}
+}
+
+func TestSession(t *testing.T) {
+	dir := t.TempDir()
+	au, err := newAuth(nil, "", dir, filepath.Join(dir, "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := func(v string) *http.Request {
+		r := httptest.NewRequest("GET", "/admin", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: v})
+		return r
+	}
+	good := au.sign("root", time.Now().Add(time.Hour))
+	if u, err := au.user(req(good)); err != nil || u != "root" {
+		t.Errorf("good session: %q %v", u, err)
+	}
+	if _, err := au.user(req(au.sign("root", time.Now().Add(-time.Minute)))); err == nil {
+		t.Error("expired session accepted")
+	}
+	forged := base64.RawURLEncoding.EncodeToString([]byte("eve|99999999999")) + good[strings.Index(good, "."):]
+	if _, err := au.user(req(forged)); err == nil {
+		t.Error("edited session accepted")
+	}
+	// The key survives a restart.
+	au2, _ := newAuth(nil, "", dir, filepath.Join(dir, "k"))
+	if _, err := au2.user(req(good)); err != nil {
+		t.Error("session lost after restart")
+	}
+}
+
+func TestRequireAdmin(t *testing.T) {
+	dir := t.TempDir()
+	au, _ := newAuth(nil, "", dir, filepath.Join(dir, "k"))
+	h := au.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	cookie := &http.Cookie{Name: sessionCookie, Value: au.sign("root", time.Now().Add(time.Hour))}
+	try := func(method string, hdr map[string]string, withCookie bool) int {
+		r := httptest.NewRequest(method, "https://ipcr-forge-x.example/admin/api/repos", nil)
+		r.Host = "ipcr-forge-x.example"
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		if withCookie {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	same := map[string]string{"X-IPCR-Admin": "1", "Origin": "https://ipcr-forge-x.example"}
+	for _, c := range []struct {
+		name   string
+		method string
+		hdr    map[string]string
+		cookie bool
+		want   int
+	}{
+		{"no session", "GET", nil, false, 401},
+		{"read", "GET", nil, true, 200},
+		{"write, same origin", "PUT", same, true, 200},
+		{"write, no header", "PUT", map[string]string{"Origin": "https://ipcr-forge-x.example"}, true, 403},
+		{"write, other origin", "PUT", map[string]string{"X-IPCR-Admin": "1", "Origin": "https://evil.example"}, true, 403},
+		{"write, fetch metadata", "POST", map[string]string{"X-IPCR-Admin": "1", "Sec-Fetch-Site": "same-origin"}, true, 200},
+	} {
+		if got := try(c.method, c.hdr, c.cookie); got != c.want {
+			t.Errorf("%s: %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// The login round trip against a fake Gitea: an administrator gets a session, anyone else a 403.
+func TestCallback(t *testing.T) {
+	admin := true
+	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			r.ParseForm()
+			if r.Form.Get("code") != "the-code" || r.Form.Get("code_verifier") == "" || r.Form.Get("client_secret") != "s3cret" ||
+				r.Form.Get("redirect_uri") != "https://ipcr-forge-x.example/admin/callback" {
+				w.WriteHeader(400)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"})
+		case "/api/v1/user":
+			if r.Header.Get("Authorization") != "Bearer tok" {
+				w.WriteHeader(401)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"login": "root", "is_admin": admin})
+		}
+	}))
+	defer gitea.Close()
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "oauth-client-id"), []byte("cid"), 0o600)
+	os.WriteFile(filepath.Join(dir, "oauth-client-secret"), []byte("s3cret"), 0o600)
+	au, _ := newAuth([]string{"ipcr-forge-x.example"}, gitea.URL, dir, filepath.Join(dir, "k"))
+
+	login := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/admin/login", nil)
+	r.Host = "ipcr-forge-x.example"
+	au.login(login, r)
+	loc, _ := url.Parse(login.Header().Get("Location"))
+	if login.Code != 302 || loc.Host != "gitea-x.example" || loc.Query().Get("code_challenge_method") != "S256" {
+		t.Fatalf("login redirect: %d %s", login.Code, loc)
+	}
+	state := loc.Query().Get("state")
+	oauth := login.Result().Cookies()[0]
+
+	call := func(state string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/admin/callback?code=the-code&state="+state, nil)
+		r.Host = "ipcr-forge-x.example"
+		r.AddCookie(oauth)
+		w := httptest.NewRecorder()
+		au.callback(w, r)
+		return w
+	}
+	if w := call("wrong"); w.Code != 400 {
+		t.Errorf("wrong state: %d", w.Code)
+	}
+	w := call(state)
+	if w.Code != 302 || w.Header().Get("Location") != "/admin" {
+		t.Fatalf("admin callback: %d %s", w.Code, w.Body)
+	}
+	var session string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			session = c.Value
+		}
+	}
+	if u, err := au.user(func() *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+		return r
+	}()); err != nil || u != "root" {
+		t.Errorf("session after login: %q %v", u, err)
+	}
+	admin = false
+	if w := call(state); w.Code != 403 {
+		t.Errorf("non-admin: %d", w.Code)
+	}
+
+	// Unknown host: no redirect to Gitea.
+	r = httptest.NewRequest("GET", "/admin/login", nil)
+	r.Host = "evil.example"
+	w = httptest.NewRecorder()
+	au.login(w, r)
+	if w.Code != 400 {
+		t.Errorf("unknown host: %d", w.Code)
+	}
+}
+
+func TestAllowlist(t *testing.T) {
+	mk := func(name string, f func(*repo)) repo {
+		r := repo{FullName: name}
+		if f != nil {
+			f(&r)
+		}
+		return r
+	}
+	repos := []repo{
+		mk("Owner/App", nil),
+		mk("owner/off", nil),
+		mk("owner/secret", func(r *repo) { r.Private = true }),
+		mk("owner/fork", func(r *repo) { r.Fork = true }),
+		mk("org/thing", nil),
+	}
+	got := strings.Join(allowlist(repos, []string{"owner/off"}), ",")
+	if got != "org/thing,owner/app" {
+		t.Errorf("allowlist = %s", got)
 	}
 }

@@ -17,3 +17,8 @@ ipfs config --json Addresses.Swarm "[
 # Soft cap on the block store. Pinned images are never collected; with --enable-gc everything
 # else (blocks fetched but not pinned) is swept every Datastore.GCPeriod.
 ipfs config Datastore.StorageMax "${IPFS_STORAGE_MAX:-20GB}"
+
+# How long an IPNS record stays valid when Kubo republishes it (every 4 h, while online). Kubo's
+# default is 48 h: a node offline for a weekend would lose every name it publishes. ipcrd publishes
+# with the same lifetime (IPNS_LIFETIME).
+ipfs config Ipns.RecordLifetime "${IPCR_IPNS_LIFETIME:-168h}"

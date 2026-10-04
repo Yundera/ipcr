@@ -5,6 +5,7 @@
 //	tag <app> <tag> <rootCID> add a tag to the app's tag directory (MFS) and publish it under IPNS key <app>
 //	resolve <name> [tag]      print the root CID a name/tag resolves to
 //	import <ref> [app:tag]    copy an image from any registry into IPFS (no containerd), optionally tag it
+//	key decrypt <backup>      print a publisher key backup's key, for `ipfs key import` (keybackup.go)
 //	health [url]              exit 0 if url (default: this gateway's /v2/) answers 200 — for healthchecks
 //
 // nerdctl stores each blob as its own IPFS object and links them only via `urls: ["ipfs://…"]`
@@ -103,6 +104,13 @@ func main() {
 				fmt.Println(name)
 			}
 		}
+	case "key":
+		// key decrypt <backup.ipcrkey.json>: the key in Kubo's export format, on stdout, for
+		// `ipfs key import <name> <file>`. The passphrase: IPCR_KEY_PASSPHRASE, else stdin's first line.
+		if len(args) != 2 || args[0] != "decrypt" {
+			usage()
+		}
+		err = decryptBackup(args[1])
 	case "health":
 		u := "https://127.0.0.1" + listen + "/v2/"
 		if len(args) > 0 {
@@ -130,7 +138,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: ipcrd serve | pin <cid>... | tag <app> <tag> <cid> | resolve <name> [tag] | import <ref> [app:tag] | health [url]")
+	fmt.Fprintln(os.Stderr, "usage: ipcrd serve | pin <cid>... | tag <app> <tag> <cid> | resolve <name> [tag] | import <ref> [app:tag] | key decrypt <backup> | health [url]")
 	os.Exit(2)
 }
 
@@ -286,80 +294,140 @@ func autoPinOnce(root string) {
 // tagImage adds <tag> → root to the app's tag directory and publishes that directory under the
 // IPNS key named <app> (one key per image).
 func tagImage(ctx context.Context, app, tag, root string) (string, error) {
-	dir, err := tagDir(ctx, "/images/"+app, tag, root)
-	if err != nil {
-		return "", err
-	}
-	return publish(ctx, app, dir)
+	return updateTree(ctx, app, "/images/"+app, 0, func(dir string) error {
+		return setTag(ctx, dir, tag, root)
+	})
 }
 
 // publishImage adds <tag> → root under <repo> in the tree published by the IPNS key <key> — one
 // key for many images: /ipns/<key>/<repo>/<tag>. <repo> may contain "/" (nested directories).
 // It returns the pull name, "<k51…>/<repo>".
 func publishImage(ctx context.Context, key, repo, tag, root string) (string, error) {
-	publishMu.Lock()
-	defer publishMu.Unlock()
-	base := "/publishers/" + key
-	if _, err := tagDir(ctx, base+"/"+repo, tag, root); err != nil {
-		return "", err
-	}
-	var st struct{ Hash string }
-	if err := kuboJSON(ctx, "files/stat", url.Values{"arg": {base}, "hash": {"true"}}, &st); err != nil {
-		return "", err
-	}
-	if err := kuboJSON(ctx, "pin/add", arg(st.Hash), nil); err != nil {
-		return "", err
-	}
-	name, err := publish(ctx, key, st.Hash)
+	name, err := updateTree(ctx, key, publisherDir(key), 0, func(base string) error {
+		return setTag(ctx, base+"/"+repo, tag, root)
+	})
 	if err != nil {
 		return "", err
 	}
 	return name + "/" + repo, nil
 }
 
-// One publisher tree at a time: two writers would each publish a tree missing the other's tag.
+func publisherDir(key string) string { return "/publishers/" + key }
+
+// One published tree at a time: two writers would each publish a tree missing the other's change.
 var publishMu sync.Mutex
 
-// tagDir sets <dir>/<tag> → root in Kubo's MFS and returns the directory's new CID, pinned.
-func tagDir(ctx context.Context, dir, tag, root string) (string, error) {
+// updateTree applies change to the MFS directory dir, then publishes dir's new CID under the IPNS
+// key <key> (created on first use) with sequence seq (0: Kubo's next). The new root is pinned and
+// the previous one unpinned, so superseded trees do not pile up as pins. The images themselves
+// keep their own pins. Returns the key's IPNS name.
+func updateTree(ctx context.Context, key, dir string, seq uint64, change func(dir string) error) (string, error) {
+	publishMu.Lock()
+	defer publishMu.Unlock()
 	if err := kuboJSON(ctx, "files/mkdir", url.Values{"arg": {dir}, "parents": {"true"}}, nil); err != nil {
 		return "", err
 	}
-	_ = kuboJSON(ctx, "files/rm", url.Values{"arg": {dir + "/" + tag}, "force": {"true"}}, nil)
-	if err := kuboJSON(ctx, "files/cp", arg("/ipfs/"+root, dir+"/"+tag), nil); err != nil {
-		return "", err
-	}
-	var st struct{ Hash string }
-	if err := kuboJSON(ctx, "files/stat", url.Values{"arg": {dir}, "hash": {"true"}}, &st); err != nil {
-		return "", err
-	}
-	if err := kuboJSON(ctx, "pin/add", arg(st.Hash), nil); err != nil {
-		return "", err
-	}
-	return st.Hash, nil
-}
-
-// publish points the IPNS key <app> (created on first use) at /ipfs/<dir> and returns its name.
-func publish(ctx context.Context, app, dir string) (string, error) {
-	var keys struct{ Keys []struct{ Name, Id string } }
-	if err := kuboJSON(ctx, "key/list", nil, &keys); err != nil {
-		return "", err
-	}
-	found := false
-	for _, k := range keys.Keys {
-		found = found || k.Name == app
-	}
-	if !found {
-		if err := kuboJSON(ctx, "key/gen", url.Values{"arg": {app}, "type": {"ed25519"}, "ipns-base": {"base36"}}, nil); err != nil {
+	old, _ := mfsHash(ctx, dir)
+	if change != nil {
+		if err := change(dir); err != nil {
 			return "", err
 		}
 	}
+	cur, err := mfsHash(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	if err := kuboJSON(ctx, "pin/add", arg(cur), nil); err != nil {
+		return "", err
+	}
+	if err := ensureKey(ctx, key); err != nil {
+		return "", err
+	}
+	name, err := publishRecord(ctx, key, cur, seq)
+	if err != nil {
+		return "", err
+	}
+	if old != "" && old != cur {
+		// Not recursive pins of the images: only this directory's own pin goes.
+		if err := kuboJSON(ctx, "pin/rm", arg(old), nil); err != nil {
+			log.Printf("unpin previous tree %s: %v", old, err)
+		}
+	}
+	return name, nil
+}
+
+func mfsHash(ctx context.Context, dir string) (string, error) {
+	var st struct{ Hash string }
+	err := kuboJSON(ctx, "files/stat", url.Values{"arg": {dir}, "hash": {"true"}}, &st)
+	return st.Hash, err
+}
+
+// setTag sets <dir>/<tag> → root in Kubo's MFS.
+func setTag(ctx context.Context, dir, tag, root string) error {
+	if err := kuboJSON(ctx, "files/mkdir", url.Values{"arg": {dir}, "parents": {"true"}}, nil); err != nil {
+		return err
+	}
+	_ = kuboJSON(ctx, "files/rm", url.Values{"arg": {dir + "/" + tag}, "force": {"true"}}, nil)
+	return kuboJSON(ctx, "files/cp", arg("/ipfs/"+root, dir+"/"+tag), nil)
+}
+
+// ensureKey creates the IPNS key <name> if this node does not have it.
+func ensureKey(ctx context.Context, name string) error {
+	id, err := keyID(ctx, name)
+	if err != nil || id != "" {
+		return err
+	}
+	return kuboJSON(ctx, "key/gen", url.Values{"arg": {name}, "type": {"ed25519"}, "ipns-base": {"base36"}}, nil)
+}
+
+type kuboKey struct{ Name, Id string }
+
+// listKeys returns this node's keys, IPNS names in base36 (k51…).
+func listKeys(ctx context.Context) ([]kuboKey, error) {
+	var keys struct{ Keys []kuboKey }
+	err := kuboJSON(ctx, "key/list", url.Values{"ipns-base": {"base36"}}, &keys)
+	return keys.Keys, err
+}
+
+// keyID returns the IPNS name (k51…) of the key <name>, or "" when there is none.
+func keyID(ctx context.Context, name string) (string, error) {
+	keys, err := listKeys(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, k := range keys {
+		if k.Name == name {
+			return k.Id, nil
+		}
+	}
+	return "", nil
+}
+
+// Record validity and caching. Kubo's default lifetime is 48h: a node offline for a weekend would
+// take every name with it. Republishing (every 4h, by Kubo) keeps the longer expiry. TTL is how
+// long resolvers may cache the record, so how quickly a moved tag is seen.
+var (
+	ipnsLifetime = env("IPNS_LIFETIME", "48h")
+	ipnsTTL      = env("IPNS_TTL", "5m")
+)
+
+// publishRecord points the IPNS key <key> at /ipfs/<dir>. seq 0 lets Kubo pick its next sequence
+// number, which it only knows from its own datastore: after a key is restored on another node, the
+// caller must pass one above the network's, or the network keeps the old record.
+func publishRecord(ctx context.Context, key, dir string, seq uint64) (string, error) {
+	v := url.Values{
+		"arg": {"/ipfs/" + dir}, "key": {key}, "ipns-base": {"base36"}, "allow-offline": {"true"},
+		"lifetime": {ipnsLifetime}, "ttl": {ipnsTTL},
+	}
+	if seq > 0 {
+		v.Set("sequence", fmt.Sprint(seq))
+	}
 	var pub struct{ Name, Value string }
-	err := kuboJSON(ctx, "name/publish", url.Values{
-		"arg": {"/ipfs/" + dir}, "key": {app}, "ipns-base": {"base36"}, "allow-offline": {"true"},
-	}, &pub)
-	log.Printf("key %s: dir %s published as /ipns/%s", app, dir, pub.Name)
-	return pub.Name, err
+	if err := kuboJSON(ctx, "name/publish", v, &pub); err != nil {
+		return "", err
+	}
+	log.Printf("key %s: dir %s published as /ipns/%s", key, dir, pub.Name)
+	return pub.Name, nil
 }
 
 // resolveTag maps /ipns/<name>/<tag> to an image root CID. <name> may carry a path
@@ -527,7 +595,15 @@ func serve() error {
 		if err != nil {
 			return fmt.Errorf("IMPORT_INTERVAL: %w", err)
 		}
-		go watch(context.Background(), w, every, env("STATE_DIR", "/data/state"))
+		if theWatcher, err = newWatcher(w, every, env("STATE_DIR", "/data/state")); err != nil {
+			return err
+		}
+		go theWatcher.run(context.Background())
+	}
+	if a := os.Getenv("ADMIN_LISTEN"); a != "" {
+		if err := serveAdmin(a, env("STATE_DIR", "/data/state")); err != nil {
+			return err
+		}
 	}
 
 	log.Printf("listening on %s (kubo %s, nerdctl registry %s, auto-pin %v, tls %v)", listen, kuboAPI, upstream, autoPin, tlsDir != "")

@@ -21,6 +21,8 @@ type mirror struct {
 	state   *state
 	repoDir string // one bare repository per Gitea repository: <id>.git
 	radHome string
+	// Called after each reconcile pass (the admin pages keep IPCR's allowlist in step).
+	onReconcile func()
 }
 
 // sync brings one Gitea repository's Radicle copy up to date, and records the outcome.

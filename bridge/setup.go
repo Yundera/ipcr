@@ -31,6 +31,8 @@ const tokenName = "ipcr-forge-bridge"
 //	a system webhook         every repository's push/create/delete/repository events → HOOK_URL,
 //	                         created or repaired (matched by URL), never duplicated.
 //	EXAMPLE_REPO             a public example repository with a workflow, created when absent.
+//	an OAuth2 application    the admin pages' Gitea login (PUBLIC_HOSTS → its redirect URIs);
+//	                         SECRETS_DIR/oauth-client-id and oauth-client-secret.
 //
 // The admin password is used here only and never stored. If it was changed since install, the
 // step leaves the existing token and hook alone instead of failing the start.
@@ -88,6 +90,12 @@ func setup() error {
 	}
 	if err := ensureHook(g, env("HOOK_URL", "http://ipcr-forge:8081/hooks/gitea"), strings.TrimSpace(string(secret))); err != nil {
 		return fmt.Errorf("webhook: %w", err)
+	}
+
+	if hosts := splitList(env("PUBLIC_HOSTS", "")); len(hosts) > 0 {
+		if err := ensureOAuthApp(g, hosts, secrets); err != nil {
+			return fmt.Errorf("admin login (OAuth2 app): %w", err)
+		}
 	}
 
 	if name := env("EXAMPLE_REPO", "ipcr-hello"); name != "-" && name != "" {
@@ -177,4 +185,71 @@ func ensureExample(g *gitea, name string) error {
 		"branch": "main", "message": "Example: a Dockerfile and the workflow that publishes it", "files": files,
 	}, nil)
 	return err
+}
+
+const oauthAppName = "ipcr-forge-admin"
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		out = append(out, f)
+	}
+	return out
+}
+
+// ensureOAuthApp registers the admin pages as a Gitea OAuth2 application, one redirect URI per host
+// the page is served on. Gitea shows a client secret only when the app is created, so a missing
+// secret file means re-creating the app.
+func ensureOAuthApp(g *gitea, hosts []string, secrets string) error {
+	var redirects []string
+	for _, h := range hosts {
+		redirects = append(redirects, "https://"+h+"/admin/callback")
+	}
+	body := map[string]any{"name": oauthAppName, "redirect_uris": redirects,
+		"confidential_client": true, "skip_secondary_authorization": true}
+	var apps []struct {
+		ID           int64    `json:"id"`
+		Name         string   `json:"name"`
+		ClientID     string   `json:"client_id"`
+		RedirectURIs []string `json:"redirect_uris"`
+	}
+	if _, err := g.call("GET", "/user/applications/oauth2?limit=50", nil, &apps); err != nil {
+		return err
+	}
+	idFile, secretFile := filepath.Join(secrets, "oauth-client-id"), filepath.Join(secrets, "oauth-client-secret")
+	haveSecret := false
+	if b, err := os.ReadFile(secretFile); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		haveSecret = true
+	}
+	for _, app := range apps {
+		if app.Name != oauthAppName {
+			continue
+		}
+		if haveSecret {
+			// Keep it (and its secret); only follow a change of hosts.
+			_, err := g.call("PATCH", fmt.Sprintf("/user/applications/oauth2/%d", app.ID), body, nil)
+			return err
+		}
+		if _, err := g.call("DELETE", fmt.Sprintf("/user/applications/oauth2/%d", app.ID), nil, nil); err != nil {
+			return err
+		}
+	}
+	var created struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if _, err := g.call("POST", "/user/applications/oauth2", body, &created); err != nil {
+		return err
+	}
+	if created.ClientID == "" || created.ClientSecret == "" {
+		return errors.New("Gitea returned no client credentials")
+	}
+	if err := writeSecret(idFile, created.ClientID); err != nil {
+		return err
+	}
+	if err := writeSecret(secretFile, created.ClientSecret); err != nil {
+		return err
+	}
+	log.Printf("setup: OAuth2 app %s for %s", oauthAppName, strings.Join(redirects, ", "))
+	return nil
 }

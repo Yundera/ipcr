@@ -19,7 +19,7 @@ file that uses it works on any host running IPCR, and the image comes from which
 - **[docs/spec.md](docs/spec.md)**: the IPCR convention (address, paths, tag layout, image format).
 - **[docs/design.md](docs/design.md)**: why it is built this way, findings, open items.
 - **[docs/naming.md](docs/naming.md)**: image names: IPNS keys, publishers, DNSLink, ENS (`example.eth`), and options studied.
-- **[docs/forge.md](docs/forge.md)**: IPCR Forge: Gitea + Actions → IPFS, public repositories mirrored to Radicle; history, findings.
+- **[docs/forge.md](docs/forge.md)**: IPCR Forge: Gitea + Actions → IPFS, public repositories mirrored to Radicle, admin pages (name, health, unpublish, key backup); history, findings.
 - **[Apps/IPCR/](Apps/IPCR/)**: the Yundera AppStore listing.
 
 ## Install

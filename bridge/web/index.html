@@ -315,7 +315,9 @@ for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blan
         var tb = table(["Tag", "Compose line", ""]);
         Object.keys(r.tags).sort(cmpTags).forEach(function (tag) {
           var info = r.tags[tag];
-          var line = "image: " + reg + "/ipns/" + r.ipns + ":" + tag;
+          // The configured domain or ENS name, while IPCR's check says it points here.
+          var path = pub.name && pub.publisher && r.ipns.indexOf(pub.publisher) === 0 ? pub.name + r.ipns.slice(pub.publisher.length) : r.ipns;
+          var line = "image: " + reg + "/ipns/" + path + ":" + tag;
           var tr = el("tr");
           var td1 = el("td"); td1.appendChild(el("code", tag));
           if (info.at) td1.appendChild(el("div", when(info.at), "muted"));

@@ -30,6 +30,15 @@
 //	IPCR_PUBLISHED   IPCR's published.json, served as /images.json
 //	                 (default /srv/ipcr-state/published.json)
 //	RECONCILE        full pass interval (default 10m)
+//
+// Admin pages (/admin, auth.go and admin.go), on when IPCR_ADMIN is set:
+//
+//	PUBLIC_HOSTS           the hosts the page is served on (ipcr-forge-<domain>, …), comma separated;
+//	                       setup registers one OAuth2 redirect URI per host
+//	IPCR_ADMIN             ipcrd's admin API (e.g. http://ipcr-gateway:4769)
+//	IPCR_ADMIN_TOKEN_FILE  its token (default /srv/ipcr-state/admin-token)
+//	KUBO_KEYSTORE          Kubo's keystore, read-only, for key backups (default /srv/ipcr-keystore)
+//	IMPORT_PUBLISHER       the publisher key's name (default forge)
 package main
 
 import (
@@ -37,6 +46,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -104,7 +114,6 @@ func serve() error {
 	}
 	q := newQueue()
 	go q.run(m.sync)
-	go reconcileLoop(m, q, every)
 
 	hook := &hookHandler{secretFile: secrets + "/hook-secret", enqueue: q.add}
 	hmux := http.NewServeMux()
@@ -113,8 +122,45 @@ func serve() error {
 		log.Fatal(http.ListenAndServe(env("HOOK_LISTEN", ":8081"), hmux))
 	}()
 
+	mux := webHandler(st, env("IPCR_PUBLISHED", "/srv/ipcr-state/published.json"))
+	if ipcr := os.Getenv("IPCR_ADMIN"); ipcr != "" {
+		au, err := newAuth(splitList(env("PUBLIC_HOSTS", "")), m.gitea.base, secrets, stateDir+"/session-key")
+		if err != nil {
+			return err
+		}
+		adm := &adminAPI{
+			ipcr: strings.TrimRight(ipcr, "/"), tokenFile: env("IPCR_ADMIN_TOKEN_FILE", "/srv/ipcr-state/admin-token"),
+			keystore: env("KUBO_KEYSTORE", "/srv/ipcr-keystore"), publisher: env("IMPORT_PUBLISHER", "forge"),
+			settings: stateDir + "/admin.json", gitea: m.gitea, http: &http.Client{Timeout: 3 * time.Minute},
+		}
+		adminRoutes(mux, au, adm)
+		// IPCR publishes nothing until it has the list (IMPORT_ALLOW_REQUIRED): send it as soon as
+		// both ends are up, then after every reconcile.
+		go func() {
+			for {
+				if !m.gitea.hasToken() {
+					time.Sleep(15 * time.Second)
+					continue
+				}
+				err := adm.pushAllowlist()
+				if err == nil {
+					return
+				}
+				log.Printf("allowlist: %v (retrying)", err)
+				time.Sleep(30 * time.Second)
+			}
+		}()
+		m.onReconcile = func() {
+			if err := adm.pushAllowlist(); err != nil {
+				log.Printf("allowlist: %v", err)
+			}
+		}
+		log.Printf("bridge: admin pages on, IPCR admin API %s", ipcr)
+	}
+	go reconcileLoop(m, q, every)
+
 	log.Printf("bridge: %s → Radicle (%s), reconcile every %s", m.gitea.base, m.radHome, every)
-	return http.ListenAndServe(env("WEB_LISTEN", ":8080"), webHandler(st, env("IPCR_PUBLISHED", "/srv/ipcr-state/published.json")))
+	return http.ListenAndServe(env("WEB_LISTEN", ":8080"), mux)
 }
 
 // reconcileLoop queues every repository Gitea shows as public, plus every one already known (so one
@@ -143,6 +189,9 @@ func reconcileLoop(m *mirror, q *queue, every time.Duration) {
 			if !seen[id] {
 				q.add(id)
 			}
+		}
+		if m.onReconcile != nil {
+			m.onReconcile()
 		}
 		time.Sleep(every)
 	}

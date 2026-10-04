@@ -35,6 +35,11 @@ with. See docs/forge.md.
 7. **Public repositories are published to Radicle automatically**, and that cannot be undone.
 8. **It replaces three apps** and cannot be installed beside them: it uses the same container names,
    domains and host ports.
+9. **Admin pages with their own login** (`/admin`): Gitea OAuth2, Gitea site admins only. The
+   install step registers the OAuth2 app.
+10. **The bridge mounts Kubo's keystore read-only**, so it can export the publisher key, encrypted.
+11. **An admin API in `ipcr-gateway`** (`:4769`) on a new internal network, `ipcr-admin`. Its Bearer
+    token is in `ipcr/state/admin-token`, mode 0644.
 
 ## Why it is necessary
 
@@ -82,6 +87,22 @@ be read by anyone, and Radicle is one more place to read it.
 every container, domain and port so they could coexist would break the defaults the services rely
 on (`radicle-api:8080`, `gitea:3000`) and the addresses users type.
 
+**9. Admin pages.** The operator needs to manage the IPCR side: the ENS or DNS name; whether the
+name and the images resolve from outside; unpublishing; which repositories may publish; and, most
+of all, backing up the publisher key, which is the only copy of every image name. Gitea is the
+forge's identity system, so the admin pages sign in with it rather than adding accounts or relying
+on the PCS gate, which is not on every host.
+
+**10. The keystore mount.** Kubo exports keys from its CLI only (`key/export` is not available
+over its HTTP API). ipcrd runs as root without capabilities, so it cannot read a `$PUID` 0700
+folder; giving it `DAC_READ_SEARCH` was rejected once already. The bridge runs as `$PUID` and can.
+
+**11. The admin API and its token.** Unpublishing, moving tags, key restore and the allowlist
+change ipcrd's own state (the published tree, `published.json`), so they live in ipcrd. The token is
+needed because CI jobs on `ci-internal` can reach `ipcr-gateway`. The file is world-readable
+because ipcrd, root without `CAP_CHOWN`, cannot hand a file to `$PUID` any other way. It sits in
+the app's own state folder.
+
 ## Security mitigations in place
 
 **The bridge**
@@ -117,8 +138,26 @@ on (`radicle-api:8080`, `gitea:3000`) and the addresses users type.
   public on IPFS.
 
 **The page**
-- **It cannot change anything.** It is served by the bridge's own read-only HTTP handler: the
-  embedded page, IPCR's `published.json` (mounted read-only) and the bridge's repository list.
+- **The public page cannot change anything.** The bridge serves it read-only: the embedded page,
+  IPCR's `published.json` (mounted read-only) and the bridge's repository list.
+
+**The admin pages**
+- **Only Gitea site admins get in.** The check is `is_admin`, read from Gitea's own API through the
+  internal address. The Gitea token is dropped right after.
+- **The session cookie:**
+  - HMAC-signed, `HttpOnly`, `Secure`, valid 8 h;
+  - the login uses PKCE and `state`, and is only accepted on the hosts in `PUBLIC_HOSTS`.
+- **Every write must be same-origin.** The `Origin` header (or Fetch Metadata) must match, and the
+  custom `X-IPCR-Admin` header is required. A cross-site form cannot send that header, and a
+  cross-site script cannot without a CORS preflight, which is never answered.
+- **The admin API is only on `ipcr-admin`.** That network is `internal: true` and shared only by
+  the bridge and `ipcr-gateway`; every call needs the Bearer token, compared in constant time. Kubo's
+  own API stays on `ipcr-internal`.
+- **The cleartext key never crosses the network.** The bridge encrypts it in memory (AES-256-GCM,
+  PBKDF2 at 600k iterations, at least 12 characters of passphrase) and ipcrd decrypts it. A
+  restore never deletes a key: the previous one is kept, renamed.
+- **The allowlist is closed by default.** Until the bridge sends its list, nothing is published
+  (`IMPORT_ALLOW_REQUIRED`). Private repositories are never on it.
 
 ## Alternatives considered and rejected
 
@@ -141,8 +180,17 @@ on (`radicle-api:8080`, `gitea:3000`) and the addresses users type.
   namespace only.
 - **Radicle signatures are the forge's, not the developer's.** The node is each repository's only
   delegate.
-- **Image names are not tied to repositories.** A build may push any name to the staging registry.
-  Per-repository credentials, issued by the bridge, are a planned follow-up.
+- **Image names are limited, but their source is not proven.** Only allowed names (public
+  repositories that are switched on) are published. A build in any repository can still push an
+  allowed name to the staging registry. Per-repository credentials, issued by the bridge, are a
+  planned follow-up.
+- **The bridge can read the publisher key.** A compromise of the public-facing bridge leaks it. That
+  is the trust it already has with the Radicle node key.
+- **The admin token is world-readable** inside the app's state folder on the host.
+- **Old keys accumulate.** `<key>-replaced-*` keys are kept and republished by Kubo until removed by
+  hand (`docker exec ipcr-kubo ipfs key rm <name>`).
+- **Re-importing a tag needs it in staging,** and staging is cleaned once a tag is published. A new
+  CI run brings it back.
 
 ## Data protection
 
@@ -152,9 +200,9 @@ Everything lives under `/DATA/AppData/ipcr-forge/`, one folder per part:
 | --- | --- |
 | `gitea/` | repositories, the database (SQLite), configuration, the runner's registration and config |
 | `radicle/` | node identity (key pair), seeded repositories, Caddy config |
-| `bridge/` | `state/`: the Gitea → Radicle mapping and one bare mirror per repository (disposable); `secrets/` (0700): its Gitea token and the webhook secret |
+| `bridge/` | `state/`: the Gitea → Radicle mapping, one bare mirror per repository (disposable), the admin session key and the repository toggles (`admin.json`); `secrets/` (0700): its Gitea token, the webhook secret, the OAuth2 client credentials |
 | `ci/` | the daemon's socket, its image store (`docker/`), the staging registry (`registry/`, disposable) |
-| `ipcr/` | Kubo repo (node identity, IPNS keys, pinned images), TLS CA, watcher state |
+| `ipcr/` | Kubo repo (node identity, IPNS keys, pinned images), TLS CA, watcher state, `config.json` (name, allowlist), the admin token |
 
 No user directory (`/DATA/Documents`, `Media`, …) is mounted. The one file outside `/DATA` is
 IPCR's `/etc/docker/certs.d/ipcr.localhost:4767/ca.crt`, as in the standalone app. Identities that

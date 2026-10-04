@@ -35,7 +35,7 @@ services:
   # with the stock `rad` CLI against the node's own home. Serves the forge's page on :8080.
   # Its install step (forge-setup, below) mints its Gitea token and registers the webhook.
   ipcr-forge:
-    image: ghcr.io/yundera/ipcr-forge-bridge:0.1.0
+    image: ghcr.io/yundera/ipcr-forge-bridge:0.2.0
     container_name: ipcr-forge
     user: $PUID:$PGID
     read_only: true
@@ -57,6 +57,14 @@ services:
       RAD_HOME: /radicle-home
       IPCR_PUBLISHED: /srv/ipcr-state/published.json
       RECONCILE: 10m
+      # Admin pages (/admin): Gitea site admins only, signed in through Gitea (an OAuth2 app the
+      # forge-setup step registers, one redirect URI per host below). They manage IPCR through its
+      # admin API (on ipcr-admin) and back up the publisher key, read from Kubo's keystore.
+      PUBLIC_HOSTS: ipcr-forge-${APP_DOMAIN},ipcr-forge-${APP_PUBLIC_IP_DASH}.nip.io,ipcr-forge-${APP_PUBLIC_IP_DASH}.sslip.io
+      IPCR_ADMIN: http://ipcr-gateway:4769
+      IPCR_ADMIN_TOKEN_FILE: /srv/ipcr-state/admin-token
+      KUBO_KEYSTORE: /srv/ipcr-keystore
+      IMPORT_PUBLISHER: ${IPCR_IMPORT_PUBLISHER:-forge}
     tmpfs:
       # HOME for git and rad.
       - /tmp
@@ -69,8 +77,11 @@ services:
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/bridge/state:/bridge
       # The Gitea token and the webhook secret the install step writes. Read-only here.
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/bridge/secrets:/secrets:ro
-      # published.json → /images.json. Read-only.
+      # published.json → /images.json, and the admin API's token. Read-only.
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/state:/srv/ipcr-state:ro
+      # Kubo's keystore, read-only: the publisher key, for encrypted backups (Kubo exports keys
+      # from its CLI only, and ipcrd, root without capabilities, cannot read a $PUID 0700 folder).
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/kubo/keystore:/srv/ipcr-keystore:ro
     depends_on:
       - gitea
       - radicle-node
@@ -94,6 +105,8 @@ services:
       caddy_2.reverse_proxy: "{{upstreams 8080}}"
     networks:
       - pcs
+      # To IPCR's admin API only.
+      - ipcr-admin
 
   # ═══ Gitea — the source of truth ═══════════════════════════════════════════════
   # From Apps/Gitea; its data folder moves to $AppID/gitea/.
@@ -271,6 +284,9 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     network_mode: service:forge-docker
+    # Garbage collection frees the blobs of deleted tags, and must not run while the registry
+    # serves: so it runs at every start, before serving.
+    entrypoint: ["sh", "-c", "registry garbage-collect --delete-untagged /etc/distribution/config.yml; exec registry serve /etc/distribution/config.yml"]
     cpu_shares: 20
     deploy:
       resources:
@@ -279,7 +295,8 @@ services:
     environment:
       TZ: $TZ
       REGISTRY_HTTP_ADDR: 0.0.0.0:5000
-      # Staging only: IPCR has its own copy once imported, so old tags may be deleted.
+      # Staging only: IPCR has its own copy once imported, and deletes each tag it has published
+      # (IMPORT_CLEANUP).
       REGISTRY_STORAGE_DELETE_ENABLED: "true"
       OTEL_TRACES_EXPORTER: none
     volumes:
@@ -421,7 +438,7 @@ services:
   # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
   # registry below, resolves /ipns/<name>:<tag> itself, and pins every image it serves.
   ipcr-gateway:
-    image: ghcr.io/yundera/ipcr:1.2.0
+    image: ghcr.io/yundera/ipcr:1.3.0
     container_name: ipcr-gateway
     # Root for one reason: it writes its CA into the host's Docker trust store (the narrow
     # bind below), which is root-owned. See rationale.md.
@@ -450,6 +467,18 @@ services:
       # /ipns/<forge key>/<repo>:<tag>. One name for the whole forge, which a DNSLink domain or an
       # ENS name can point at: ipcr.localhost:4767/ipns/example.eth/<repo>:<tag>.
       IMPORT_PUBLISHER: ${IPCR_IMPORT_PUBLISHER:-forge}
+      # Forge: publish only the repositories the bridge allows (public Gitea repositories, minus
+      # those switched off in the admin pages). Until the bridge sends its list, nothing is.
+      IMPORT_ALLOW_REQUIRED: "true"
+      # Forge: delete each tag from the staging registry once published (its blobs go at the
+      # registry's next start, see forge-registry).
+      IMPORT_CLEANUP: "true"
+      # IPNS records valid 7 days instead of Kubo's 48 h, so a forge offline for a weekend keeps
+      # its name; resolvers cache them 5 minutes, so a new tag shows up quickly.
+      IPNS_LIFETIME: ${IPCR_IPNS_LIFETIME:-168h}
+      IPNS_TTL: 5m
+      # Forge: the admin API, for the bridge, on ipcr-admin. Bearer token in state/admin-token.
+      ADMIN_LISTEN: ":4769"
       IMPORT_INTERVAL: 60s
       STATE_DIR: /data/state
     volumes:
@@ -477,6 +506,8 @@ services:
       - ipcr-internal
       # Forge only: reaches the staging registry for the import poller above.
       - ci-internal
+      # Forge only: the admin API, reached by the bridge.
+      - ipcr-admin
     cpu_shares: 50
     deploy:
       resources:
@@ -486,7 +517,7 @@ services:
   # ── Stock nerdctl IPFS registry ─────────────────────────────────────────────
   # `nerdctl ipfs registry serve`, unmodified: translates the registry API into IPFS reads.
   ipcr-registry:
-    image: ghcr.io/yundera/ipcr:1.2.0
+    image: ghcr.io/yundera/ipcr:1.3.0
     container_name: ipcr-registry
     # Root because nerdctl run as any other uid assumes rootless mode and refuses to start
     # without a rootless containerd — which `ipfs registry serve` never uses. The service has
@@ -573,6 +604,10 @@ networks:
   # From Apps/IPCR: gateway ↔ registry ↔ kubo, nothing else.
   ipcr-internal:
     driver: bridge
+  # Bridge → IPCR's admin API, nothing else; no egress.
+  ipcr-admin:
+    driver: bridge
+    internal: true
 
 x-casaos:
   architectures:
@@ -636,6 +671,12 @@ x-casaos:
         **Start here: [the forge's page](https://ipcr-forge-$APP_DOMAIN)**: how to publish, the
         published images, the Radicle mirrors.
 
+        **Admin: [ipcr-forge-$APP_DOMAIN/admin](https://ipcr-forge-$APP_DOMAIN/admin)**, signed in
+        with Gitea (site administrators only): your ENS or DNS name, health of the published name,
+        unpublishing images, which repositories may publish, and the **publisher key backup**.
+        Download one after the first release: the key exists only on this server, and losing it
+        loses every image name.
+
         **Replaces three apps.** Uninstall Gitea, Radicle and IPCR first: this app uses the same
         addresses and ports.
 
@@ -654,13 +695,19 @@ x-casaos:
         private later stops the copy, and what was published stays on the network. Private
         repositories are never copied.
 
-        **Who can publish images.** Anyone who can push to a repository here: a build can push any
-        image name to the staging registry, and IPCR publishes what it finds there under this
-        forge's name. Images are public once on IPFS, even from a private repository. Read a
-        fork's workflow before approving its run.
+        **Who can publish images.** Only the names of public repositories that are switched on in the
+        admin pages (all are, by default): `<owner>/<repo>`. A build in any repository can still
+        push any name to the staging registry, so whoever can push code here can publish under an
+        allowed name. Read a fork's workflow before approving its run.
       fr_fr: |
         **Commencez ici : [la page de la forge](https://ipcr-forge-$APP_DOMAIN)** : publier, les
         images publiées, les copies Radicle.
+
+        **Administration : [ipcr-forge-$APP_DOMAIN/admin](https://ipcr-forge-$APP_DOMAIN/admin)**,
+        connexion via Gitea (administrateurs du site uniquement) : votre nom ENS ou DNS, l'état du
+        nom publié, le retrait d'images, les dépôts autorisés à publier, et la **sauvegarde de la
+        clé de publication**. Téléchargez-en une après la première version : la clé n'existe que
+        sur ce serveur, et la perdre fait perdre tous les noms d'images.
 
         **Remplace trois applications.** Désinstallez d'abord Gitea, Radicle et IPCR : cette
         application utilise les mêmes adresses et ports.
@@ -680,10 +727,11 @@ x-casaos:
         privé ensuite arrête la copie, et ce qui a été publié reste sur le réseau. Les dépôts privés
         ne sont jamais copiés.
 
-        **Qui peut publier des images.** Toute personne qui peut pousser sur un dépôt d'ici : un
-        build peut pousser n'importe quel nom d'image vers le registre de transit, et IPCR publie ce
-        qu'il y trouve sous le nom de cette forge. Une image est publique une fois sur IPFS, même
-        si elle vient d'un dépôt privé. Lisez le workflow d'un fork avant d'approuver son exécution.
+        **Qui peut publier des images.** Seuls les noms des dépôts publics activés dans
+        l'administration (tous, par défaut) : `<propriétaire>/<dépôt>`. Un build de n'importe quel
+        dépôt peut tout de même pousser n'importe quel nom vers le registre de transit : qui peut
+        pousser du code ici peut publier sous un nom autorisé. Lisez le workflow d'un fork avant
+        d'approuver son exécution.
   index: /
   webui_port: 3000
   store_app_id: ipcr-forge
@@ -736,6 +784,12 @@ x-compose-app:
       mode: "0700"
     # ── IPCR ──
     - path: /DATA/AppData/$AppID/ipcr/kubo
+      user: $PUID
+      group: $PGID
+      mode: "0700"
+    # Created ahead of Kubo's first start: the bridge mounts it, and Docker would otherwise create
+    # it as root, where Kubo cannot write its keys.
+    - path: /DATA/AppData/$AppID/ipcr/kubo/keystore
       user: $PUID
       group: $PGID
       mode: "0700"
@@ -806,10 +860,10 @@ x-compose-app:
           chmod 600 /runner/token
       when: absent:/DATA/AppData/$AppID/gitea/runner/.runner
     # The bridge's Gitea token (public-only, read:repository), the webhook secret, the system
-    # webhook, and the example repository. Idempotent, so on every start: it repairs the webhook.
+    # webhook, the admin pages' OAuth2 app, and the example repository. Idempotent, so on every start: it repairs the webhook.
     # The admin password is used here only, never stored.
     - name: forge-setup
-      image: ghcr.io/yundera/ipcr-forge-bridge:0.1.0
+      image: ghcr.io/yundera/ipcr-forge-bridge:0.2.0
       user: $PUID:$PGID
       phase: post_up
       network: $APP_NET
@@ -818,7 +872,7 @@ x-compose-app:
       command:
         - sh
         - -c
-        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" GITEA_URL=http://gitea:3000 ipcr-forge-bridge setup
+        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" GITEA_URL=http://gitea:3000 PUBLIC_HOSTS="ipcr-forge-$APP_DOMAIN,ipcr-forge-$APP_PUBLIC_IP_DASH.nip.io,ipcr-forge-$APP_PUBLIC_IP_DASH.sslip.io" ipcr-forge-bridge setup
       when: always
   webui-host: gitea-${domain}
   webui-path: /

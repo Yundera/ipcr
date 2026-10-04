@@ -352,6 +352,17 @@ func (r *registry) tags(ctx context.Context, repo string) ([]string, error) {
 	return t.Tags, json.NewDecoder(resp.Body).Decode(&t)
 }
 
+// deleteManifest removes a manifest (and with it every tag pointing at it) by digest. The registry
+// must allow deletes; the blobs go at its next garbage collection.
+func (r *registry) deleteManifest(ctx context.Context, repo, dgst string) error {
+	resp, err := r.do(ctx, "DELETE", "/v2/"+repo+"/manifests/"+dgst, "", "repository:"+repo+":delete")
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
 func sha256Digest(b []byte) string {
 	s := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(s[:])
@@ -593,7 +604,7 @@ func announce(ctx context.Context, root string) {
 
 // ---------------------------------------------------------------- watch
 
-// watch polls a registry and imports every tag of every repository it lists (or of the
+// watcher polls a registry and imports every tag of every repository it lists (or of the
 // repositories named in IMPORT_REPOS), publishing each as /ipns/<key>/<tag>, where <key> is the
 // repository path with "/" → "-". A tag is re-imported when its manifest digest changes, which is
 // how a moving tag like `latest` follows the registry.
@@ -601,104 +612,255 @@ func announce(ctx context.Context, root string) {
 // With IMPORT_PUBLISHER=<key name>, every repository is published under that one key instead, as
 // /ipns/<key>/<repo>/<tag>: one name for all the images, which a DNSLink domain or an ENS name
 // can point at (ipcr.localhost:4767/ipns/example.eth/<repo>:<tag>).
-func watch(ctx context.Context, registryURL string, every time.Duration, stateDir string) {
+//
+// Its state is shared with the admin API (admin.go), hence the mutex: the API unpublishes, moves
+// tags and asks for re-imports, and reads what is published.
+type watcher struct {
+	mu        sync.Mutex
+	u         *url.URL
+	every     time.Duration
+	stateDir  string
+	publisher string
+	state     map[string]string // state key (see stateKey) → manifest digest last imported, or tombstone
+	pub       published
+	kick      chan struct{}
+	skipped   map[string]bool // repositories already logged as not allowed
+}
+
+// The running watcher, for the admin API. nil when IMPORT_WATCH is not set.
+var theWatcher *watcher
+
+// A tag the admin unpublished: state[key] = tombstone + digest. The watcher leaves it alone until the
+// registry's tag moves to another digest.
+const tombstone = "unpublished:"
+
+func newWatcher(registryURL string, every time.Duration, stateDir string) (*watcher, error) {
 	u, err := url.Parse(registryURL)
 	if err != nil || u.Host == "" {
-		log.Printf("watch: bad IMPORT_WATCH %q", registryURL)
-		return
+		return nil, fmt.Errorf("bad IMPORT_WATCH %q", registryURL)
 	}
-	statePath := filepath.Join(stateDir, "imported.json")
-	state := map[string]string{} // "repo:tag" → manifest digest last imported
-	if b, err := os.ReadFile(statePath); err == nil {
-		_ = json.Unmarshal(b, &state)
+	w := &watcher{u: u, every: every, stateDir: stateDir, publisher: os.Getenv("IMPORT_PUBLISHER"),
+		state: map[string]string{}, pub: published{Images: map[string]*publishedRepo{}},
+		kick: make(chan struct{}, 1), skipped: map[string]bool{}}
+	if b, err := os.ReadFile(w.path("imported.json")); err == nil {
+		_ = json.Unmarshal(b, &w.state)
 	}
 	// published.json is the public view of the same thing — what to write in an `image:` line —
-	// for a UI to read (the forge's landing page serves it as /images.json).
-	pubPath := filepath.Join(stateDir, "published.json")
-	pub := published{Images: map[string]*publishedRepo{}}
-	if b, err := os.ReadFile(pubPath); err == nil {
-		_ = json.Unmarshal(b, &pub)
+	// for a UI to read (the forge's page serves it as /images.json).
+	if b, err := os.ReadFile(w.path("published.json")); err == nil {
+		_ = json.Unmarshal(b, &w.pub)
 	}
-	write := func(path string, v any) {
-		b, _ := json.MarshalIndent(v, "", "  ")
-		err := os.MkdirAll(stateDir, 0o755)
-		if err == nil {
-			err = os.WriteFile(path+".tmp", b, 0o644)
-		}
-		if err == nil {
-			err = os.Rename(path+".tmp", path)
-		}
-		if err != nil {
-			log.Printf("watch: save %s: %v", filepath.Base(path), err)
-		}
+	if w.pub.Images == nil {
+		w.pub.Images = map[string]*publishedRepo{}
 	}
-	publisher := os.Getenv("IMPORT_PUBLISHER")
-	log.Printf("watch: %s every %s", registryURL, every)
-	if publisher != "" {
-		log.Printf("watch: publishing every repository under the IPNS key %q", publisher)
+	return w, nil
+}
+
+func (w *watcher) path(name string) string { return filepath.Join(w.stateDir, name) }
+
+func (w *watcher) stateKey(repo, tag string) string {
+	if w.publisher != "" {
+		// Its own entries, so that turning publisher mode on publishes what is there.
+		return w.publisher + "|" + repo + ":" + tag
+	}
+	return repo + ":" + tag
+}
+
+// save writes the watcher's two files. Call with w.mu held.
+func (w *watcher) save() {
+	writeJSON(w.path("imported.json"), w.state)
+	writeJSON(w.path("published.json"), &w.pub)
+}
+
+// writeJSON writes v to path atomically (written then renamed, so a reader never sees half of it).
+func writeJSON(path string, v any) {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	err := os.MkdirAll(filepath.Dir(path), 0o755)
+	if err == nil {
+		err = os.WriteFile(path+".tmp", b, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(path+".tmp", path)
+	}
+	if err != nil {
+		log.Printf("save %s: %v", filepath.Base(path), err)
+	}
+}
+
+// wake asks for a pass now rather than at the next interval.
+func (w *watcher) wake() {
+	select {
+	case w.kick <- struct{}{}:
+	default:
+	}
+}
+
+func (w *watcher) run(ctx context.Context) {
+	log.Printf("watch: %s every %s", w.u, w.every)
+	if w.publisher != "" {
+		log.Printf("watch: publishing every repository under the IPNS key %q", w.publisher)
 	}
 	for {
-		// A fresh client each pass: credentials are re-read (a token written or rotated by an
-		// install step is picked up) and cached bearer tokens never outlive their expiry.
-		reg := newRegistry(u.Scheme, u.Host)
-		repos := strings.FieldsFunc(os.Getenv("IMPORT_REPOS"), func(r rune) bool { return r == ',' || r == ' ' })
-		if len(repos) == 0 {
-			if repos, err = reg.catalog(ctx); err != nil {
-				log.Printf("watch: catalog: %v", err)
-			}
-		}
-		for _, repo := range repos {
-			tags, err := reg.tags(ctx, repo)
-			if err != nil {
-				log.Printf("watch: %s: %v", repo, err)
-				continue
-			}
-			for _, tag := range tags {
-				dgst, err := reg.headDigest(ctx, repo, tag)
-				if err != nil {
-					log.Printf("watch: %s:%s: %v", repo, tag, err)
-					continue
-				}
-				key := repo + ":" + tag
-				if publisher != "" {
-					// Its own entries, so that turning publisher mode on publishes what is there.
-					key = publisher + "|" + key
-				}
-				if state[key] == dgst && pub.has(repo, tag) {
-					continue
-				}
-				root, err := importFrom(ctx, reg, repo, dgst)
-				if err == nil {
-					var name string
-					if publisher != "" {
-						name, err = publishImage(ctx, publisher, repo, tag, root)
-						if err == nil {
-							pub.Publisher, _, _ = strings.Cut(name, "/")
-						}
-					} else {
-						name, err = tagImage(ctx, strings.ReplaceAll(repo, "/", "-"), tag, root)
-					}
-					if err == nil {
-						log.Printf("watch: %s:%s → ipcr.localhost:4767/ipns/%s:%s (/ipfs/%s)", repo, tag, name, tag, root)
-						pub.set(repo, name, tag, publishedTag{CID: root, Digest: dgst, At: time.Now().UTC().Format(time.RFC3339)})
-						write(pubPath, &pub)
-					}
-				}
-				if err != nil {
-					log.Printf("watch: %s:%s: %v", repo, tag, err)
-					continue
-				}
-				state[key] = dgst
-				write(statePath, state)
-			}
-		}
+		w.pass(ctx)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(every):
+		case <-time.After(w.every):
+		case <-w.kick:
 		}
 	}
 }
+
+// pass is one look at the registry.
+func (w *watcher) pass(ctx context.Context) {
+	cfg := loadConfig(w.stateDir)
+	// A fresh client each pass: credentials are re-read (a token written or rotated by an install
+	// step is picked up) and cached bearer tokens never outlive their expiry.
+	reg := newRegistry(w.u.Scheme, w.u.Host)
+	repos := strings.FieldsFunc(os.Getenv("IMPORT_REPOS"), func(r rune) bool { return r == ',' || r == ' ' })
+	if len(repos) == 0 {
+		var err error
+		if repos, err = reg.catalog(ctx); err != nil {
+			log.Printf("watch: catalog: %v", err)
+			return
+		}
+	}
+	for _, repo := range repos {
+		if !cfg.allowed(repo) {
+			w.mu.Lock()
+			if !w.skipped[repo] {
+				log.Printf("watch: %s: not on the allowlist, not published", repo)
+				w.skipped[repo] = true
+			}
+			w.mu.Unlock()
+			continue
+		}
+		w.mu.Lock()
+		delete(w.skipped, repo)
+		w.mu.Unlock()
+		tags, err := reg.tags(ctx, repo)
+		if err != nil {
+			log.Printf("watch: %s: %v", repo, err)
+			continue
+		}
+		digests := map[string]string{} // tag → digest, for the cleanup below
+		done := map[string]bool{}      // tag → nothing left to do for it
+		complete := true               // every tag's digest is known
+		for _, tag := range tags {
+			dgst, err := reg.headDigest(ctx, repo, tag)
+			if err != nil {
+				log.Printf("watch: %s:%s: %v", repo, tag, err)
+				complete = false
+				continue
+			}
+			digests[tag] = dgst
+			done[tag] = w.importTag(ctx, reg, repo, tag, dgst)
+		}
+		if cleanupStaging && complete {
+			w.cleanup(ctx, reg, repo, digests, done)
+		}
+	}
+}
+
+// importTag imports and publishes repo:tag unless it already is (or was unpublished on purpose).
+// It reports whether the tag is settled.
+func (w *watcher) importTag(ctx context.Context, reg *registry, repo, tag, dgst string) bool {
+	key := w.stateKey(repo, tag)
+	w.mu.Lock()
+	prev, has := w.state[key], w.pub.has(repo, tag)
+	w.mu.Unlock()
+	if prev == tombstone+dgst || (prev == dgst && has) {
+		return true
+	}
+	root, err := importFrom(ctx, reg, repo, dgst)
+	var name string
+	if err == nil {
+		if w.publisher != "" {
+			name, err = publishImage(ctx, w.publisher, repo, tag, root)
+		} else {
+			name, err = tagImage(ctx, strings.ReplaceAll(repo, "/", "-"), tag, root)
+		}
+	}
+	if err != nil {
+		log.Printf("watch: %s:%s: %v", repo, tag, err)
+		return false
+	}
+	log.Printf("watch: %s:%s → ipcr.localhost:4767/ipns/%s:%s (/ipfs/%s)", repo, tag, name, tag, root)
+	w.mu.Lock()
+	if w.publisher != "" {
+		w.pub.Publisher, _, _ = strings.Cut(name, "/")
+	}
+	w.pub.set(repo, name, tag, publishedTag{CID: root, Digest: dgst, At: time.Now().UTC().Format(time.RFC3339)})
+	w.state[key] = dgst
+	w.save()
+	w.mu.Unlock()
+	return true
+}
+
+// Delete what was imported from the source registry (IMPORT_CLEANUP=true; the forge's staging
+// registry, which is only a hand-off). A manifest is deleted by digest, which removes every tag
+// pointing at it, so a digest goes only when all of its tags are settled.
+var cleanupStaging = env("IMPORT_CLEANUP", "false") == "true"
+
+func (w *watcher) cleanup(ctx context.Context, reg *registry, repo string, digests map[string]string, done map[string]bool) {
+	ready := map[string]bool{}
+	for tag, d := range digests {
+		if _, seen := ready[d]; !seen {
+			ready[d] = true
+		}
+		ready[d] = ready[d] && done[tag]
+	}
+	for d, ok := range ready {
+		if !ok {
+			continue
+		}
+		if err := reg.deleteManifest(ctx, repo, d); err != nil {
+			log.Printf("watch: cleanup %s@%s: %v", repo, d, err)
+			continue
+		}
+		log.Printf("watch: cleanup: removed %s@%s from %s", repo, d, reg.host)
+	}
+}
+
+// ---------------------------------------------------------------- configuration
+
+// config is what the admin can change at run time, kept in STATE_DIR/config.json and re-read at
+// every pass. Environment variables are the defaults.
+type config struct {
+	// The DNSLink domain or ENS name pointing at the publisher key, e.g. example.eth. Shown in
+	// pull lines once checked (see admin.go).
+	Name  string `json:"name,omitempty"`
+	Allow struct {
+		// Only the listed repositories are published. Also on with IMPORT_ALLOW_REQUIRED=true,
+		// where an empty list therefore publishes nothing.
+		Required bool     `json:"required"`
+		Repos    []string `json:"repos"`
+	} `json:"allow"`
+}
+
+func loadConfig(stateDir string) config {
+	var c config
+	if b, err := os.ReadFile(filepath.Join(stateDir, "config.json")); err == nil {
+		if err := json.Unmarshal(b, &c); err != nil {
+			log.Printf("config.json: %v", err)
+		}
+	}
+	return c
+}
+
+func (c config) allowed(repo string) bool {
+	if !c.Allow.Required && os.Getenv("IMPORT_ALLOW_REQUIRED") != "true" && len(c.Allow.Repos) == 0 {
+		return true
+	}
+	for _, r := range c.Allow.Repos {
+		if strings.EqualFold(r, repo) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------- published.json
 
 type publishedTag struct {
 	CID    string `json:"cid"`
@@ -714,8 +876,12 @@ type publishedRepo struct {
 type published struct {
 	Registry string `json:"registry"`
 	// The IPNS name of the IMPORT_PUBLISHER key, when set: what a DNSLink or ENS record points at.
-	Publisher string                    `json:"publisher,omitempty"`
-	Images    map[string]*publishedRepo `json:"images"`
+	Publisher string `json:"publisher,omitempty"`
+	// The DNSLink domain or ENS name configured for the publisher, set only while it is checked
+	// to resolve to Publisher: pull lines can use it instead of the k51 name.
+	Name           string                    `json:"name,omitempty"`
+	NameVerifiedAt string                    `json:"nameVerifiedAt,omitempty"`
+	Images         map[string]*publishedRepo `json:"images"`
 }
 
 func (p *published) has(repo, tag string) bool {
@@ -736,4 +902,13 @@ func (p *published) set(repo, ipns, tag string, t publishedTag) {
 	}
 	r.IPNS = ipns
 	r.Tags[tag] = t
+}
+
+func (p *published) remove(repo, tag string) {
+	if r := p.Images[repo]; r != nil {
+		delete(r.Tags, tag)
+		if len(r.Tags) == 0 {
+			delete(p.Images, repo)
+		}
+	}
 }
