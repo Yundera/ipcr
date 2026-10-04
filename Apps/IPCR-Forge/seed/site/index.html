@@ -98,8 +98,9 @@ service. Code lives on Radicle, Gitea Actions builds it, and IPCR serves the ima
   <div class="arrow">→</div>
   <div class="step"><b>5 · Pull</b><small>any server with IPCR: <code>ipcr.localhost:4767/ipns/…</code></small></div>
 </div>
-<p>Steps 2 to 4 are automatic and take two to three minutes. A repository needs no configuration
-beyond committing a workflow.</p>
+<p>Steps 2 to 4 are automatic and usually take a few minutes. The very first build on this server
+takes longer (about 5 to 10 minutes) while the runner downloads its build images. A repository
+needs no configuration beyond committing a workflow.</p>
 
 <h2 id="images">Published images</h2>
 <div id="images-body"><p class="muted">Loading…</p></div>
@@ -107,17 +108,26 @@ beyond committing a workflow.</p>
 <h2 id="publish">Publish a project</h2>
 <ol>
   <li><b>Install Radicle</b> on your machine and create an identity: see
-    <a href="https://radicle.xyz/" target="_blank" rel="noopener">radicle.xyz</a>, then <code>rad auth</code>.</li>
+    <a href="https://radicle.xyz/" target="_blank" rel="noopener">radicle.xyz</a>, then <code>rad auth</code>.
+    Start your own node, which carries your pushes: <code>rad node start</code>.</li>
   <li><b>Connect to this server's node</b> so your pushes reach it:
     <pre><code id="connect-cmd">rad node connect &lt;node-id&gt;@&lt;this server&gt;:8776</code></pre></li>
-  <li><b>Publish the repository</b> from its folder: <code>rad init</code>. It prints a repository
-    ID (<code>rad:z…</code>).</li>
+  <li><b>Publish the repository.</b> It has to be a Git repository with at least one commit:
+<pre><code>git init -b main
+git add -A
+git commit -m "First commit"
+rad init</code></pre>
+    <code>rad init</code> prints the repository ID (<code>rad:z…</code>).</li>
   <li><b>Let this node seed it.</b> The node only keeps repositories it is told to (seeding policy
     <i>block</i>). In this server's Terminal app or over SSH:
-    <pre><code>docker exec radicle-node rad seed rad:z… --scope all</code></pre></li>
+    <pre><code>docker exec radicle-node rad seed rad:z… --scope all</code></pre>
+    It ends with <code>✗ Target not met: could not fetch from […]</code>. That is about the public
+    Radicle seeds, not this server, and can be ignored. The repository is in place once it shows
+    in the <a class="radicle-link" href="#">Radicle explorer</a>.</li>
   <li><b>Add a workflow</b> at <code>.gitea/workflows/build.yml</code>. This one builds the
     <code>Dockerfile</code> at the root and publishes it for every <code>v*</code> tag. The
-    <code>REGISTRY_TOKEN</code> secret is already set for every repository.
+    <code>REGISTRY_TOKEN</code> secret is already set for every repository. Commit it
+    (<code>git add .gitea &amp;&amp; git commit -m "Build the image"</code>).
 <pre><code>on:
   push:
     tags: ['v*']
@@ -211,6 +221,7 @@ for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blan
   }
   document.getElementById("host").textContent = base || host;
   setLink("link-radicle", "radicle");
+  Array.prototype.forEach.call(document.querySelectorAll("a.radicle-link"), function (a) { a.href = url("radicle"); });
   setLink("link-gitea", "gitea");
   setLink("t-radicle", "radicle", true);
   setLink("t-radicle-api", "radicle-api", true);
