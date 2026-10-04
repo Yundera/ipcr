@@ -96,7 +96,6 @@ type repo struct {
 	Mirror        bool   `json:"mirror"`
 	Empty         bool   `json:"empty"`
 	DefaultBranch string `json:"default_branch"`
-	HTMLURL       string `json:"html_url"`
 	Owner         struct {
 		Login string `json:"login"`
 		// public | limited | private. Only a public owner's repositories are public.

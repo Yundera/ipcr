@@ -24,7 +24,6 @@ const (
 type repoState struct {
 	ID            int64     `json:"id"`
 	FullName      string    `json:"full_name"`
-	HTMLURL       string    `json:"html_url,omitempty"`
 	RID           string    `json:"rid,omitempty"`
 	DefaultBranch string    `json:"default_branch,omitempty"`
 	State         string    `json:"state"`

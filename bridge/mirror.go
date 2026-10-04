@@ -46,7 +46,7 @@ func (m *mirror) sync(id int64) {
 		return
 	}
 	cur := prev
-	cur.FullName, cur.HTMLURL = r.FullName, r.HTMLURL
+	cur.FullName = r.FullName
 	if r.Empty {
 		if cur.RID == "" {
 			cur.State, cur.Error = stWaiting, ""

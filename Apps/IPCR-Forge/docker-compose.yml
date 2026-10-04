@@ -200,7 +200,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          # act_runner holds a job's checkout and actions in memory while it copies them into the
+          # job container: 256M was OOM-killed mid-job on the first build (holyhorse, 2026-10-04).
+          memory: 1G
     environment:
       TZ: $TZ
       HOME: /data

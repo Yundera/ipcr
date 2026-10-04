@@ -43,6 +43,10 @@ func (m *mirror) run(timeout time.Duration, dir, name string, args ...string) (s
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			// rad reports its errors on stdout.
+			msg = strings.TrimSpace(stdout.String())
+		}
 		if len(msg) > 500 {
 			msg = "…" + msg[len(msg)-500:]
 		}
@@ -66,7 +70,7 @@ func (m *mirror) rad(dir string, args ...string) (string, error) {
 func (m *mirror) radInit(dir string, r *repo) (string, error) {
 	desc := r.Description
 	if desc == "" {
-		desc = "Mirrored from " + r.HTMLURL
+		desc = "Mirrored from Gitea: " + r.FullName
 	}
 	out, err := m.rad(dir, "init", dir, "--name", r.Name, "--description", desc,
 		"--default-branch", r.DefaultBranch, "--public", "--no-confirm")

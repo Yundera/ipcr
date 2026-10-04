@@ -148,11 +148,20 @@ New in v3 (tested locally with Gitea 1.27.3 and rad 1.10.1, 2026-10-04):
 10. **`rad sync` blocks for its timeout when the node has no peers.** The bridge pushes with
     `-o no-sync` and announces separately with a 30-second bound, so a push is never held up by the
     network.
+11. **`act_runner` needs about 1 GB.** It holds a job's checkout and actions in memory while it
+    copies them into the job container. At 256 MB it was OOM-killed mid-job. The job container
+    then ran on, orphaned, and Gitea showed the run as "running" until it timed out.
+12. **The first `rad init` can fail if the node is still starting.** The bridge's retry adopts the
+    RID that `rad init` already wrote into the mirror's `rad` remote, so no second repository is
+    created (seen on holyhorse). `rad` prints its errors on stdout, which the bridge now logs.
+13. **Gitea's API returns `html_url` built from the internal address** (`http://gitea:3000/…`) when
+    called through it. The page builds Gitea links from its own host name instead.
+14. **Right after `up`, new domains answer with the gateway's SSO redirect** until Caddy picks up the
+    labels (about a minute). The runner's registration retries through that window.
 
 ## Verified
 
-Local integration (Gitea 1.27.3-rootless, `radicle-seed-node` 1.10.1, the bridge image, one Docker
-network):
+**Locally** (Gitea 1.27.3-rootless, `radicle-seed-node` 1.10.1, the bridge image, one Docker network):
 
 - `setup` run twice leaves exactly one system hook.
 - `ipcr-hello` was created and mirrored with the crefs rule in its identity.
@@ -160,14 +169,22 @@ network):
 - A private repository never appeared.
 - A public repository made private was frozen.
 
-The full chain on a PCS (runner → staging → IPCR → pull from a second server) is in
-[Open items](#open-items) until it is run on a test box.
+**On holyhorse** (a test PCS, hand install that mimics Maison, 2026-10-04):
+
+| Step | Result |
+| --- | --- |
+| install steps: Gitea admin, runner token, `forge-setup` | token, system hook, `ipcr-hello` created; runner registered |
+| `ipcr-hello` mirrored to Radicle | `rad:z4Nc3jTG2q2rfQbio2gfuA7tWouee`, crefs rule in place |
+| tag `v1.0.1` created through Gitea's API (as the web UI does) | Actions run started on `push`; tag canonical on Radicle in seconds |
+| build (job image pulled cold) | success after about 4 min; `localhost:5000/gitea_admin/ipcr-hello:1.0.1` and `latest` |
+| IPCR import | about a minute later: `/ipns/k51qzi5uqu5dg7urd3olssfzho23ze73n0jd9rwlqkivjlz3gspzyajk8cqfmd/gitea_admin/ipcr-hello:1.0.1` |
+| `docker pull` of that name, then `docker run` | page served (`Hello from IPFS`) |
+| forge page `ipcr-forge-holyhorse.nsl.sh` | 200; `/images.json` and `/repos.json` filled |
 
 ## Open items
 
-- **Run the full chain on a test PCS.** Check that the runner registers, that jobs see the daemon
-  (`docker_host: ""` mounts its socket into each job), that a `v*` tag on `ipcr-hello` builds and
-  imports, and that the image pulls from a second server.
+- **Pull from a second server.** Verified on holyhorse itself only; v2's images pulled across
+  servers the same way.
 - **Publish the images**: `ghcr.io/yundera/ipcr:1.2.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.1.0`
   (workflows `image.yml` and `bridge.yml`, tag `bridge-v0.1.0`).
 - **Per-repository image names:** the bridge as a registry token server (see Trust).
