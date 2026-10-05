@@ -35,7 +35,7 @@ services:
   # with the stock `rad` CLI against the node's own home. Serves the forge's page on :8080.
   # Its install step (forge-setup, below) mints its Gitea token and registers the webhook.
   ipcr-forge:
-    image: ghcr.io/yundera/ipcr-forge:0.6.0
+    image: ghcr.io/yundera/ipcr-forge:0.6.1
     container_name: ipcr-forge
     user: $PUID:$PGID
     read_only: true
@@ -285,7 +285,7 @@ services:
   # push that name only; IPCR logs in as the importer (state/staging-auth, which it generates).
   # Same image as the forge service (`ipcr-forge gate`, forge/gate.go in ipcr-forge). See rationale.md.
   forge-gate:
-    image: ghcr.io/yundera/ipcr-forge:0.6.0
+    image: ghcr.io/yundera/ipcr-forge:0.6.1
     container_name: forge-gate
     user: $PUID:$PGID
     read_only: true
@@ -980,7 +980,7 @@ x-compose-app:
     # the example repository (in that organisation). Idempotent, so on every start: it repairs the webhook.
     # The admin password is used here only, never stored.
     - name: forge-setup
-      image: ghcr.io/yundera/ipcr-forge:0.6.0
+      image: ghcr.io/yundera/ipcr-forge:0.6.1
       user: $PUID:$PGID
       phase: post_up
       network: $APP_NET
