@@ -724,6 +724,7 @@ func (w *watcher) run(ctx context.Context) {
 	log.Printf("watch: %s every %s", w.u, w.every)
 	if w.publisher != "" {
 		log.Printf("watch: publishing every repository under the IPNS key %q", w.publisher)
+		go w.ensurePublisherKey(ctx, 5*time.Second)
 	}
 	for {
 		w.pass(ctx)
@@ -732,6 +733,27 @@ func (w *watcher) run(ctx context.Context) {
 			return
 		case <-time.After(w.every):
 		case <-w.kick:
+		}
+	}
+}
+
+// ensurePublisherKey creates the publisher's IPNS key at start-up rather than at the first import,
+// so its name (k51…) is known from the first boot: an ENS or DNS record can point at it, and the
+// key can be backed up, before anything is published. The name resolves to nothing until then.
+// Retries until Kubo answers (it may start after this process).
+func (w *watcher) ensurePublisherKey(ctx context.Context, retry time.Duration) {
+	for {
+		err := ensureKey(ctx, w.publisher)
+		if err == nil {
+			if id, err := keyID(ctx, w.publisher); err == nil && id != "" {
+				log.Printf("watch: IPNS key %q is /ipns/%s", w.publisher, id)
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retry):
 		}
 	}
 }

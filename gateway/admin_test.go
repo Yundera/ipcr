@@ -207,6 +207,9 @@ func (k *fakeKubo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k.keys[a[1]] = k.keys[a[0]]
 		delete(k.keys, a[0])
 		json.NewEncoder(w).Encode(map[string]any{"Was": a[0], "Now": a[1]})
+	case "key/gen":
+		k.keys[q.Get("arg")] = "k51generated" + q.Get("arg")
+		json.NewEncoder(w).Encode(map[string]string{"Name": q.Get("arg"), "Id": k.keys[q.Get("arg")]})
 	case "key/rm":
 		delete(k.keys, q.Get("arg"))
 		w.Write([]byte("{}"))
@@ -229,6 +232,39 @@ func (k *fakeKubo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"Name": k.keys[q.Get("key")]})
 	default: // files/mkdir, pin/add, pin/rm, …
 		w.Write([]byte("{}"))
+	}
+}
+
+// The publisher key exists from the first start, once Kubo answers; an existing key is kept.
+func TestEnsurePublisherKey(t *testing.T) {
+	k := &fakeKubo{keys: map[string]string{"self": "k51self"}}
+	down := true
+	ksrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down {
+			down = false // Kubo not up yet on the first call
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		k.ServeHTTP(w, r)
+	}))
+	defer ksrv.Close()
+	old := kuboAPI
+	kuboAPI = ksrv.URL
+	defer func() { kuboAPI = old }()
+
+	w := &watcher{publisher: "forge"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	w.ensurePublisherKey(ctx, 10*time.Millisecond)
+	if k.keys["forge"] != "k51generatedforge" {
+		t.Fatalf("keys %v", k.keys)
+	}
+	n := len(k.calls)
+	w.ensurePublisherKey(ctx, 10*time.Millisecond)
+	for _, c := range k.calls[n:] {
+		if strings.HasPrefix(c, "key/gen") {
+			t.Error("generated a key that already exists")
+		}
 	}
 }
 

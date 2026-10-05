@@ -42,8 +42,10 @@ so the split is unambiguous.
 
 `ipcrd`'s import watcher publishes this way when `IMPORT_PUBLISHER=<key name>` is set
 (`IPCR_IMPORT_PUBLISHER` in the apps). It keeps the tree in Kubo's MFS at `/publishers/<key>`
-and republishes the key after every import. The key's name (`k51…`) appears in the log and as
-`publisher` in `state/published.json`. IPCR Forge uses the key `forge` by default. Without the
+and republishes the key after every import. The key is created when `ipcrd` starts, not at the
+first import, so its name (`k51…`) is known before anything is published: an ENS or DNS record
+can point at it, and the key can be backed up, from the first boot. It resolves to nothing until
+the first import. The name appears in the log and as `publisher` in `state/published.json`. IPCR Forge uses the key `forge` by default. Without the
 setting, each repository gets its own key, as before.
 
 ## Without IPCR
