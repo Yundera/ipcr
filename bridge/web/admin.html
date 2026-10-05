@@ -126,6 +126,16 @@
       <div class="copyrow"><code id="dns-value">dnslink=/ipns/k51…</code><button class="copy" data-copy="dns-value">Copy</button></div>
     </details>
   </div>
+  <div class="card wide">
+    <h3>Public pulls</h3>
+    <p class="muted">This forge's images, and only those, can also be pulled from any machine with plain Docker, without IPCR,
+      through <code id="public-host">ipcr-…</code>. Read-only; a pull there pins nothing. Layers are still checked by digest.</p>
+    <form class="row" id="public-form">
+      <label><input type="checkbox" id="public-on"> Serve public pulls</label>
+      <span id="public-state" class="muted"></span>
+    </form>
+    <div class="copyrow"><code id="public-try">docker pull …</code><button class="copy" data-copy="public-try">Copy</button></div>
+  </div>
 </div>
 
 <h2>Health <button id="refresh">Check again</button> <span id="refresh-state" class="muted"></span></h2>
@@ -216,6 +226,8 @@
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
   var publisher = "", pubName = "";
+  // The public front door's host: same suffix as this page, ipcr- instead of ipcr-forge-.
+  var publicHost = location.hostname.indexOf("ipcr-forge-") === 0 ? "ipcr-" + location.hostname.slice("ipcr-forge-".length) : "";
 
   function toast(msg, ms) {
     var t = $("toast"); t.textContent = msg; t.style.display = "block";
@@ -348,6 +360,22 @@
       $("storage").appendChild(bar);
     }).catch(function (e) { st8.textContent = ""; toast("Status: " + e.message, 8000); });
   }
+  function loadPublic() {
+    $("public-host").textContent = publicHost || "ipcr-<domain>";
+    return api("GET", "ipcr/config").then(function (c) {
+      $("public-on").checked = !!c.public;
+      $("public-state").textContent = c.public ? "on" : "off";
+      $("public-try").textContent = "docker pull " + (publicHost || "ipcr-<domain>") + "/ipns/" + (pubName || publisher || "k51…") + "/<repo>:<tag>";
+    });
+  }
+  $("public-on").onchange = function () {
+    var cb = this, st = $("public-state");
+    cb.disabled = true; st.textContent = ""; st.appendChild(spinner("saving…"));
+    api("PATCH", "ipcr/config", { public: cb.checked })
+      .then(function (c) { toast(c.public ? "Public pulls on (within 10 s)" : "Public pulls off (within 10 s)"); return loadPublic(); },
+            function (e) { cb.checked = !cb.checked; toast(e.message, 8000); })
+      .then(function () { cb.disabled = false; loadImages(); });
+  };
   $("refresh").onclick = function () { busy(this, loadStatus(true)); };
   $("republish").onclick = function () {
     busy(this, api("POST", "ipcr/republish")).then(function () { toast("Published again"); loadStatus(true); });
@@ -390,6 +418,7 @@
     var path = (short || img.repo) + ":" + tg.tag, rows = [["IPFS", reg + "/ipfs/" + tg.cid]];
     if (d.publisher) rows.push(["IPNS", reg + "/ipns/" + d.publisher + "/" + path]);
     if (d.name) rows.push([/\.eth$/.test(d.name) ? "ENS" : "DNS", reg + "/ipns/" + d.name + "/" + path]);
+    if (d.public && publicHost && (d.name || d.publisher)) rows.push(["Public", publicHost + "/ipns/" + (d.name || d.publisher) + "/" + path]);
     if (short && (d.name || d.publisher)) rows.push(["Also", reg + "/ipns/" + (d.name || d.publisher) + "/" + img.repo + ":" + tg.tag]);
     var box = el("div");
     rows.forEach(function (r) {
@@ -567,7 +596,7 @@
     }).catch(function (e) { toast(e.message, 8000); });
   };
 
-  loadStatus(false); loadImages(); loadRepos(); loadSettings();
+  loadStatus(false).then(loadPublic); loadImages(); loadRepos(); loadSettings();
 })();
 </script>
 </body>

@@ -579,7 +579,7 @@ func (a *admin) handleImages(w http.ResponseWriter, r *http.Request) {
 		return v
 	}
 	wt.mu.Lock()
-	out := map[string]any{"publisher": wt.pub.Publisher, "name": wt.pub.Name, "registry": wt.pub.Registry}
+	out := map[string]any{"publisher": wt.pub.Publisher, "name": wt.pub.Name, "registry": wt.pub.Registry, "public": cfg.publicOn()}
 	for repo, pr := range wt.pub.Images {
 		v := view(repo)
 		v.IPNS, v.Aliases = pr.IPNS, pr.Aliases
@@ -857,8 +857,9 @@ var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0
 func (a *admin) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "PATCH" {
 		var req struct {
-			Name  *string `json:"name"`
-			Allow *struct {
+			Public *bool   `json:"public"`
+			Name   *string `json:"name"`
+			Allow  *struct {
 				Required bool                `json:"required"`
 				Repos    []string            `json:"repos"`
 				Aliases  map[string][]string `json:"aliases"`
@@ -905,7 +906,13 @@ func (a *admin) handleConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if req.Public != nil {
+			cfg.Public = req.Public
+		}
 		writeJSON(filepath.Join(a.stateDir, "config.json"), cfg)
+		if req.Public != nil && theWatcher != nil {
+			theWatcher.syncPublic(cfg)
+		}
 		if nameChanged {
 			a.forget()
 			if wt, err := publisherWatcher(); err == nil {
@@ -919,7 +926,7 @@ func (a *admin) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg := loadConfig(a.stateDir)
-	reply(w, map[string]any{"config": cfg, "allowRequired": cfg.Allow.Required || os.Getenv("IMPORT_ALLOW_REQUIRED") == "true",
+	reply(w, map[string]any{"config": cfg, "public": cfg.publicOn(), "allowRequired": cfg.Allow.Required || os.Getenv("IMPORT_ALLOW_REQUIRED") == "true",
 		"lifetime": ipnsLifetime, "ttl": ipnsTTL})
 }
 

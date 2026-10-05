@@ -46,6 +46,15 @@ and republishes the key after every import. The key's name (`k51…`) appears in
 `publisher` in `state/published.json`. IPCR Forge uses the key `forge` by default. Without the
 setting, each repository gets its own key, as before.
 
+## Without IPCR
+
+A host without IPCR can pull through a publisher's public front door, if it runs one (IPCR Forge
+does, at `ipcr-<domain>`): `docker pull ipcr-<domain>/ipns/example.eth/<image>:<tag>`. The name
+works the same way; only the address in front of `/ipns/` changes. That address is a single server,
+though, so `ipcr.localhost:4767` remains the address to put in compose files that must keep
+working. A public IPFS gateway (ipfs.io, dweb.link) cannot serve `docker pull`: it has no registry
+API ([forge.md](forge.md#public-front-door)).
+
 ## ENS, step by step
 
 Kubo already resolves `.eth` names: its default `DNS.Resolvers` (`"auto"`) sends them to eth.limo's

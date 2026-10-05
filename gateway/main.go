@@ -636,6 +636,12 @@ func serve() error {
 			return
 		}
 		if m := ipfsPath.FindStringSubmatch(r.URL.Path); m != nil {
+			if public != nil {
+				if ok, why := public.allows("ipfs", m[1]); !ok {
+					ociError(w, http.StatusNotFound, "NAME_UNKNOWN", why)
+					return
+				}
+			}
 			if m[2] == "manifests" && m[3] == "latest" {
 				autoPinOnce(m[1])
 			}
@@ -648,6 +654,12 @@ func serve() error {
 			return
 		}
 		name, kind, ref := m[1], m[2], m[3]
+		if public != nil {
+			if ok, why := public.allows("ipns", name); !ok {
+				ociError(w, http.StatusNotFound, "NAME_UNKNOWN", why)
+				return
+			}
+		}
 		ctx := r.Context()
 
 		if kind == "manifests" && !strings.Contains(ref, ":") { // a tag

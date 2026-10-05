@@ -177,6 +177,32 @@ ipcr.localhost:4767/ipns/k51…/ipcr-hello:1.0.0
 - **Setup:** creates the organisation (public, owned by `gitea_admin`) if it is missing, and puts
   the example repository in it.
 
+## Public front door
+
+`docker pull ipcr-<domain>/ipns/metadec.eth/ipcr-hello:1.0.0` works on any machine with plain
+Docker: no IPCR, no CA to trust, no IPFS node.
+
+**Why a public IPFS gateway can't do this:** `docker pull ipfs.io/ipns/…` asks for
+`/v2/ipns/…/manifests/…`, a registry API that file gateways don't have. Blobs are then asked for by
+digest, which only something that walks the image's descriptors can turn into CIDs.
+
+**How it works.** `ipcr-public` is the same ipcrd, a second process, behind Caddy.
+- **Plain HTTP:** Caddy terminates TLS.
+- **No pinning:** `AUTO_PIN=false`.
+- **Off the admin and CI networks.**
+- **`PUBLIC_POLICY` points it at the main gateway's state** (read-only). It then serves only:
+  - this forge's publisher name;
+  - its ENS/DNS name, while verified;
+  - the root CIDs of its published images.
+
+  Everything else is 404, so nobody can make the node fetch other IPFS content. Pushes get 405.
+- **Off switch:** the admin page's "Public pulls" switch (`config.json` `"public"`), picked up within
+  10 s. Pages show the "Public" / "without IPCR" pull lines while it is on.
+
+**It's a convenience, not the main way to pull.** It depends on this server; `ipcr.localhost:4767`
+works from any IPCR node that has, or can find, the image. Docker still checks every layer by
+digest, so the front door cannot swap content.
+
 ## Staging gate and push credentials
 
 ```
@@ -349,12 +375,23 @@ New in v3 (tested locally with Gitea 1.27.3 and rad 1.10.1, 2026-10-04):
 | a user named `ipcr-hello` | short path skipped, reason shown; back when the user is gone |
 | repository switched off | gate credential and Gitea secret removed; restored when switched on |
 
+**Public front door, on holyhorse** (ipcr 1.5.0, bridge 0.4.0, 2026-10-05):
+
+| Check | Result |
+| --- | --- |
+| from another machine (Docker Desktop, no IPCR): `docker pull ipcr-holyhorse.nsl.sh/ipns/metadec.eth/ipcr-hello:1.0.0` | pulled, ran, served the page |
+| same by `k51…/metadec/ipcr-hello:latest` and by `/ipfs/<cid>` | pulled |
+| pins on the server after those pulls | unchanged (16) |
+| wisera's k51, `vitalik.eth`, an unpublished CID, `/v2/_catalog` | 404 |
+| a `PUT` | 405 |
+| switch off / on | pull "not found", page hides the line / pulls again within 10 s |
+
 ## Open items
 
-- **Pull from a second server.** Verified on holyhorse itself only; v2's images pulled across
-  servers the same way.
-- **Publish the images**: `ghcr.io/yundera/ipcr:1.4.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.3.0`
-  (workflows `image.yml` and `bridge.yml`, tags `v1.4.0` and `bridge-v0.3.0`).
+- **Pull from a second IPCR server** (`ipcr.localhost`): verified on holyhorse itself only, though
+  the public front door was pulled from another machine; v2's images pulled across IPCR servers.
+- **Publish the images**: `ghcr.io/yundera/ipcr:1.5.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.4.0`
+  (workflows `image.yml` and `bridge.yml`, tags `v1.5.0` and `bridge-v0.4.0`).
 - **CI isolation:** jobs on a privileged daemon can reach the host. Rootless DinD does not start
   on this platform (AppArmor); a VM-based runner would be the real fix.
 - **Private repositories** cannot publish: the bridge only sees public ones. If wanted, give them

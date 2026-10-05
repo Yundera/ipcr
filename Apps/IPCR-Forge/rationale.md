@@ -48,6 +48,8 @@ with. See docs/forge.md.
     bridge.
 15. **The root organisation** (`IPCR_ROOT_ORG`): setup creates it if missing, and its repositories
     are also published at the root of the forge's name.
+16. **A public, unauthenticated, read-only registry route** (`ipcr-<domain>` → `ipcr-public`), so this
+    forge's images can be pulled without IPCR.
 
 ## Why it is necessary
 
@@ -132,6 +134,11 @@ already mounts read-only.
 repositories may use them. A Gitea organisation makes "who may publish there" a matter of team
 membership, managed in Gitea.
 
+**16. The public front door.** The IPFS address only works on machines running IPCR. People trying
+an image elsewhere (a laptop, a CI on another platform) need a registry that plain Docker can pull
+from. Public IPFS gateways cannot do it, since they have no registry API. A login would defeat the
+purpose: the images are public on IPFS anyway.
+
 ## Security mitigations in place
 
 **The bridge**
@@ -181,6 +188,18 @@ membership, managed in Gitea.
 - **Credentials follow the list.** A repository switched off or frozen loses its gate credential
   and its secret at once. "Reissue" rotates a token.
 - **Gate container:** `$PUID`, no capabilities, read-only root filesystem, 64 MB.
+
+**The public front door**
+- **This forge's images only.** It answers only for the publisher's own IPNS name, its verified
+  ENS/DNS name, and the root CIDs of published images. Anything else is 404 before any resolution,
+  so strangers cannot use it to fetch or serve other IPFS content.
+- **Read-only and storage-neutral.** GET and HEAD only, and `AUTO_PIN=false`: a pull never pins.
+- **Isolated.**
+  - It is a separate process (`ipcr-public`) on `pcs` and `ipcr-internal` only, not on the admin
+    or CI networks.
+  - It runs as `$PUID` with no capabilities and a read-only root filesystem, capped at 256 MB.
+  - It reads the main gateway's state read-only.
+- **Can be switched off** in the admin pages (`config.json` `"public": false`).
 
 **The page**
 - **The public page cannot change anything.** The bridge serves it read-only: the embedded page,

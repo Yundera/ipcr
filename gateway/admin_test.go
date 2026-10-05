@@ -484,3 +484,46 @@ func TestEnsureImportAuth(t *testing.T) {
 		t.Error("regenerated on restart")
 	}
 }
+
+func TestPublicPolicy(t *testing.T) {
+	dir := t.TempDir()
+	pub := published{Images: map[string]*publishedRepo{}}
+	pub.Publisher, pub.Name = "k51forge", "metadec.eth"
+	pub.set("metadec/app", "k51forge/metadec/app", "1.0.0", publishedTag{CID: "bafyroot"})
+	writeJSON(filepath.Join(dir, "published.json"), &pub)
+	p := &publicPolicy{dir: dir}
+	for _, c := range []struct {
+		kind, name string
+		want       bool
+	}{
+		{"ipns", "k51forge/app", true},
+		{"ipns", "k51forge", true},
+		{"ipns", "metadec.eth/app", true},
+		{"ipns", "other.eth/app", false},
+		{"ipns", "k51someoneelse/app", false},
+		{"ipfs", "bafyroot", true},
+		{"ipfs", "bafyother", false},
+	} {
+		if ok, _ := p.allows(c.kind, c.name); ok != c.want {
+			t.Errorf("%s %s: %v, want %v", c.kind, c.name, ok, c.want)
+		}
+	}
+	// An unverified name is not served: published.json only carries a name while it checks out.
+	pub.Name = ""
+	writeJSON(filepath.Join(dir, "published.json"), &pub)
+	off := false
+	writeJSON(filepath.Join(dir, "config.json"), config{Public: &off})
+	p = &publicPolicy{dir: dir}
+	if ok, why := p.allows("ipns", "k51forge/app"); ok || !strings.Contains(why, "off") {
+		t.Errorf("switched off: %v %q", ok, why)
+	}
+	on := true
+	writeJSON(filepath.Join(dir, "config.json"), config{Public: &on})
+	p = &publicPolicy{dir: dir}
+	if ok, _ := p.allows("ipns", "metadec.eth/app"); ok {
+		t.Error("unverified name served")
+	}
+	if ok, _ := p.allows("ipns", "k51forge/app"); !ok {
+		t.Error("switched back on")
+	}
+}

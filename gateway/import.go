@@ -788,6 +788,17 @@ func (w *watcher) pass(ctx context.Context) {
 	if w.publisher != "" {
 		w.syncAliases(ctx, cfg)
 	}
+	w.syncPublic(cfg)
+}
+
+// syncPublic mirrors config.json's public switch into published.json.
+func (w *watcher) syncPublic(cfg config) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pub.Public != cfg.publicOn() {
+		w.pub.Public = cfg.publicOn()
+		w.save()
+	}
 }
 
 // importTag imports and publishes repo:tag unless it already is (or was unpublished on purpose).
@@ -979,7 +990,11 @@ type config struct {
 		// metadec/app as /ipns/<publisher>/app (IPCR Forge: its root organisation's repositories).
 		Aliases map[string][]string `json:"aliases,omitempty"`
 	} `json:"allow"`
+	// The public front door (public.go): nil or true = on.
+	Public *bool `json:"public,omitempty"`
 }
+
+func (c config) publicOn() bool { return c.Public == nil || *c.Public }
 
 func loadConfig(stateDir string) config {
 	var c config
@@ -1024,9 +1039,12 @@ type published struct {
 	Publisher string `json:"publisher,omitempty"`
 	// The DNSLink domain or ENS name configured for the publisher, set only while it is checked
 	// to resolve to Publisher: pull lines can use it instead of the k51 name.
-	Name           string                    `json:"name,omitempty"`
-	NameVerifiedAt string                    `json:"nameVerifiedAt,omitempty"`
-	Images         map[string]*publishedRepo `json:"images"`
+	Name           string `json:"name,omitempty"`
+	NameVerifiedAt string `json:"nameVerifiedAt,omitempty"`
+	// Whether the public front door serves these images (config.json "public"), for pages to show
+	// its pull lines.
+	Public bool                      `json:"public"`
+	Images map[string]*publishedRepo `json:"images"`
 }
 
 func (p *published) has(repo, tag string) bool {
