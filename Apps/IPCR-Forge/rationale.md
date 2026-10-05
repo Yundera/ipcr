@@ -3,7 +3,7 @@
 IPCR Forge is the forge without the apps it is built on: it uses the store's **Gitea** app
 (required) and **Radicle** app (optional), and brings the rest: the forge service (`ipcr-forge`),
 a CI runner with its own Docker daemon, the staging registry and its gate, and IPCR. It is
-[IPCR Forge (all in one)](../IPCR-Forge-AIO/rationale.md) minus the bundled Gitea and Radicle, with
+[IPCR Forge (AIO)](../IPCR-Forge-AIO/rationale.md) minus the bundled Gitea and Radicle, with
 the same image and the same services otherwise. That document's arguments apply here unchanged for
 everything this listing still ships: the privileged CI daemon, the staging gate and push
 credentials, the forge service's access to IPCR's admin API and to the publisher key, the public front

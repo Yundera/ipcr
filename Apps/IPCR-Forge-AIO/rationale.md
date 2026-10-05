@@ -1,4 +1,4 @@
-# IPCR Forge (all in one) — Rationale
+# IPCR Forge (AIO) — Rationale
 
 This listing was `IPCR-Forge` (app ID `ipcr-forge`) until the split listing took that name. Its app
 ID is now `ipcr-forge-aio`, so its data root moved: an install made before the rename keeps its data
@@ -6,7 +6,7 @@ under `/DATA/AppData/ipcr-forge/` and is reinstalled rather than migrated (only 
 one). The split listing, [IPCR-Forge](../IPCR-Forge/rationale.md), uses the store's Gitea and
 Radicle apps instead of bundling them; both run the same image.
 
-IPCR Forge (all in one) bundles three store apps (Gitea, Radicle, IPCR), a CI runner with its own Docker daemon,
+IPCR Forge (AIO) bundles three store apps (Gitea, Radicle, IPCR), a CI runner with its own Docker daemon,
 and the forge service (`ipcr-forge`), which mirrors public Gitea repositories to Radicle and
 serves the forge's page. The Gitea, Radicle and IPCR services are copied from their listings,
 so each keeps the deviations its standalone listing already argues. This document lists them,

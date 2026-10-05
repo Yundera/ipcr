@@ -721,7 +721,7 @@ x-casaos:
     - screenshot-2.png
     - screenshot-3.png
   title:
-    en_us: IPCR Forge (all in one)
+    en_us: IPCR Forge (AIO)
   tagline:
     en_us: Gitea with Actions, images served from IPFS, code mirrored to Radicle.
     fr_fr: Gitea avec Actions, images servies depuis IPFS, code répliqué sur Radicle.

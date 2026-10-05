@@ -533,7 +533,7 @@ x-casaos:
         down.
 
       **Requires the Gitea app.** Radicle is optional, and can be added later. Already running
-      neither? **IPCR Forge (all in one)** bundles both.
+      neither? **IPCR Forge (AIO)** bundles both.
 
       A repository publishes images by committing a workflow under `.gitea/workflows/` that runs
       on `ipcr` and pushes to `localhost:5000`. The install creates an example, `ipcr-hello`:
@@ -554,7 +554,7 @@ x-casaos:
         serveur est arrêté.
 
       **Nécessite l'application Gitea.** Radicle est facultatif, et peut être ajouté plus tard.
-      Aucune des deux installée ? **IPCR Forge (all in one)** les regroupe.
+      Aucune des deux installée ? **IPCR Forge (AIO)** les regroupe.
 
       Un dépôt publie des images en ajoutant un workflow sous `.gitea/workflows/` qui tourne sur
       `ipcr` et pousse vers `localhost:5000`. L'installation crée un exemple, `ipcr-hello` :
