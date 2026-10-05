@@ -35,7 +35,7 @@ One IPNS name holds a directory per image, each a tag directory (spec §3):
 
 A publisher may also put an image at a shorter path: `allow.aliases` in `config.json` publishes
 `metadec/app` as `/ipns/<name>/app` as well. IPCR Forge uses this for its root organisation's
-repositories, so `metadec.eth/app` names `metadec/app` ([forge.md](forge.md#root-organisation-short-names)).
+repositories, so `metadec.eth/app` names `metadec/app` ([IPCR Forge](https://github.com/Yundera/ipcr-forge/blob/main/docs/forge.md#root-organisation-short-names)).
 An alias is one segment, and it is never the first segment of another image's path. Docker
 accepts multi-segment repository paths, and the reference (tag or digest) never contains a `/`,
 so the split is unambiguous.
@@ -53,7 +53,7 @@ does, at `ipcr-<domain>`): `docker pull ipcr-<domain>/ipns/example.eth/<image>:<
 works the same way; only the address in front of `/ipns/` changes. That address is a single server,
 though, so `ipcr.localhost:4767` remains the address to put in compose files that must keep
 working. A public IPFS gateway (ipfs.io, dweb.link) cannot serve `docker pull`: it has no registry
-API ([forge.md](forge.md#public-front-door)).
+API ([IPCR Forge](https://github.com/Yundera/ipcr-forge/blob/main/docs/forge.md#public-front-door)).
 
 ## ENS, step by step
 
@@ -99,7 +99,7 @@ Rules that follow:
   caches and third-party republishers, not the DHT itself. The record's TTL (`IPNS_TTL`, 5 min) is
   how long resolvers cache it: how quickly a moved tag is seen.
 - **The key is the name.** It exists only in that node's Kubo keystore. Back it up: IPCR Forge's
-  admin page exports it encrypted ([forge.md](forge.md#admin)).
+  admin page exports it encrypted ([IPCR Forge](https://github.com/Yundera/ipcr-forge/blob/main/docs/forge.md#admin)).
 - **Restoring a key on another node needs a higher sequence number.** Kubo only knows its own
   sequence, and the network keeps the record with the highest one. A restore therefore publishes
   at `max(network, local) + 1`, and refuses when it cannot read the network.

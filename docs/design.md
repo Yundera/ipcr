@@ -78,14 +78,31 @@ dockerd ──TLS──▶ ipcr-gateway 127.0.0.1:4767 (ipcrd)
     this node, bitswap fetches every other block over the same connection.
 9. **Forge handoff: poll, don't push.** CI jobs run in a nested Docker that cannot reach
    `ipcr.localhost`, so IPCR pulls instead. The watcher polls the registry catalog. In IPCR Forge
-   that registry is the CI's internal staging registry; see [forge.md](forge.md).
+   that registry is the CI's internal staging registry; see [IPCR Forge](https://github.com/Yundera/ipcr-forge/blob/main/docs/forge.md).
 11. **One name for many images.** `/ipns/<name>/<path>:<tag>` and the watcher's publisher mode put
     every image under one IPNS key, which an ENS or DNSLink name can point at once and for all.
     Verified with `metadec.eth`; see [naming.md](naming.md).
 12. **An admin API, not admin features in the registry.** Unpublishing, moving tags, the
     allowlist, name checks and key restore are served on a separate listener (`ADMIN_LISTEN`), with
-    a Bearer token, for one client: a UI that puts its own login in front (IPCR Forge's bridge). The
-    registry port stays read-only. See [forge.md](forge.md#admin).
+    a Bearer token, for one client: a UI that puts its own login in front (IPCR Forge's service). The
+    registry port stays read-only. See [IPCR Forge](https://github.com/Yundera/ipcr-forge/blob/main/docs/forge.md#admin).
+
+
+## Contract with add-ons
+
+IPCR is the engine; add-ons such as [IPCR Forge](https://github.com/Yundera/ipcr-forge) (a git
+submodule here, at `ipcr-forge/`) build on it without the engine knowing about them. What an add-on
+may rely on, and what a release of `ghcr.io/yundera/ipcr` must therefore keep or announce as a
+breaking change (a major version):
+
+| Surface | What | Where |
+| --- | --- | --- |
+| Registry API | `/v2/ipfs/<cid>`, `/v2/ipns/<name>[/<path>]:<tag>`, read-only | `gateway/main.go` |
+| Import watcher | `IMPORT_WATCH`, `IMPORT_PUBLISHER`, `IMPORT_AUTH[_FILE\|_GENERATE]`, `IMPORT_ALLOW_REQUIRED`, `IMPORT_CLEANUP`, `IPNS_LIFETIME`, `IPNS_TTL` | `gateway/import.go` |
+| State files | `STATE_DIR/published.json` (read by pages), `config.json` (`name`, `allow.repos`, `allow.aliases`, `public`), `admin-token`, `staging-auth` | `gateway/import.go`, `gateway/admin.go` |
+| Admin API | `ADMIN_LISTEN`, Bearer token, the `/admin/*` endpoints | `gateway/admin.go` |
+| Key backups | the `*.ipcrkey.json` format (an add-on keeps a copy; both test the same vector) | `gateway/keybackup.go` |
+| Public front door | `PUBLIC_POLICY=<state dir>` | `gateway/public.go` |
 
 ## Open items
 

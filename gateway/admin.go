@@ -2,7 +2,7 @@ package main
 
 // The admin API: what a publisher's operator needs beyond the registry. Served on ADMIN_LISTEN,
 // plain HTTP, every request with `Authorization: Bearer <STATE_DIR/admin-token>`. It is meant for
-// one client on a private network (IPCR Forge's bridge, which puts a login in front of it), not for
+// one client on a private network (IPCR Forge's service, which puts a login in front of it), not for
 // people: it can unpublish images and replace the publisher key.
 //
 //	GET  /admin/status            key, node, storage, IPNS record (here and on the network), name check

@@ -12,8 +12,8 @@ package main
 // and exports it (`ipfs key export`, libp2p-protobuf-cleartext). The additional data binds name and
 // id to the ciphertext, so neither can be edited. Byte slices are base64 (encoding/json's default).
 //
-// The same file is written by IPCR Forge's bridge (which can read the keystore; ipcrd cannot) and
-// read here, so the cleartext key never crosses the network. bridge/keybackup.go is a copy: keep
+// The same file is written by IPCR Forge's service (which can read the keystore; ipcrd cannot) and
+// read here, so the cleartext key never crosses the network. ipcr-forge's forge/keybackup.go is a copy: keep
 // the two identical (both test the same vector).
 
 import (

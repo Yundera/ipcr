@@ -21,8 +21,8 @@ import (
 const (
 	vectorKey = "CAESQEgAFnJaC//4NMPXmGjBx4fMcn1cRGFhAV2reN7GqcyS+z5e/JsuHUwhZneaa52YACcp2T6p2ri/FfdyILTLfWo="
 	vectorID  = "k51qzi5uqu5dmg0qkz1yhcmegr2nf4jc7q8v9xw1mqv2p6211xzntxps7n6dm2"
-	// sealKey("forge", vectorKey, vectorPass): the same vector is in bridge/bridge_test.go, so the
-	// bridge's backups open here.
+	// sealKey("forge", vectorKey, vectorPass): the same vector is in ipcr-forge's forge/bridge_test.go, so
+	// the forge's backups open here.
 	vectorPass   = "correct horse battery staple"
 	vectorBackup = `{"v":1,"kdf":"pbkdf2-sha256","iter":600000,"salt":"5mqcBpjiFkE3IVdNeqL6Bw==","nonce":"xKVdz0QswnMpkRz3","name":"forge","id":"k51qzi5uqu5dmg0qkz1yhcmegr2nf4jc7q8v9xw1mqv2p6211xzntxps7n6dm2","format":"libp2p-protobuf-cleartext","ct":"k9Hq6zuS1jmKA13OeIZpGuK4M5pUIKA0F4n0mQrFq5J8E/Q+RlRzu91PoTJGiwR/zUeOG14uO138MG3pPVqTzrFklRcN21yEGyeImaUf0EdWJPUX"}`
 )
