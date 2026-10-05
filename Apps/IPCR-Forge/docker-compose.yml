@@ -39,7 +39,7 @@ services:
   # with the stock `rad` CLI against the node's own home. Serves the forge's page on :8080.
   # Its install step (forge-setup, below) mints its Gitea token and registers the webhook.
   ipcr-forge:
-    image: ghcr.io/yundera/ipcr-forge:0.6.2
+    image: ghcr.io/yundera/ipcr-forge:0.6.3
     container_name: ipcr-forge
     user: $PUID:$PGID
     read_only: true
@@ -210,7 +210,7 @@ services:
   # push that name only; IPCR logs in as the importer (state/staging-auth, which it generates).
   # Same image as the forge service (`ipcr-forge gate`, forge/gate.go in ipcr-forge). See rationale.md.
   forge-gate:
-    image: ghcr.io/yundera/ipcr-forge:0.6.2
+    image: ghcr.io/yundera/ipcr-forge:0.6.3
     container_name: forge-gate
     user: $PUID:$PGID
     read_only: true
@@ -277,7 +277,7 @@ services:
   # ipcrd: TLS front door on 127.0.0.1:4767. Passes /ipfs/<cid> through to the stock nerdctl
   # registry below, resolves /ipns/<name>:<tag> itself, and pins every image it serves.
   ipcr-gateway:
-    image: ghcr.io/yundera/ipcr:1.6.0
+    image: ghcr.io/yundera/ipcr:1.6.1
     container_name: ipcr-gateway
     # Root for one reason: it writes its CA into the host's Docker trust store (the narrow
     # bind below), which is root-owned. See rationale.md.
@@ -365,7 +365,7 @@ services:
   # then works on any machine, without IPCR. A pull here pins nothing. The admin pages switch it
   # off (config.json "public": false). Not on the admin or CI networks. See rationale.md.
   ipcr-public:
-    image: ghcr.io/yundera/ipcr:1.6.0
+    image: ghcr.io/yundera/ipcr:1.6.1
     container_name: ipcr-public
     user: $PUID:$PGID
     read_only: true
@@ -413,7 +413,7 @@ services:
   # ── Stock nerdctl IPFS registry ─────────────────────────────────────────────
   # `nerdctl ipfs registry serve`, unmodified: translates the registry API into IPFS reads.
   ipcr-registry:
-    image: ghcr.io/yundera/ipcr:1.6.0
+    image: ghcr.io/yundera/ipcr:1.6.1
     container_name: ipcr-registry
     # Root because nerdctl run as any other uid assumes rootless mode and refuses to start
     # without a rootless containerd — which `ipfs registry serve` never uses. The service has
@@ -747,7 +747,7 @@ x-compose-app:
     # never stored. Waits up to 240s for the Gitea app, then records why it could not go on
     # (forge/secrets/setup-status, shown on the forge's page) and lets the start finish.
     - name: forge-setup
-      image: ghcr.io/yundera/ipcr-forge:0.6.2
+      image: ghcr.io/yundera/ipcr-forge:0.6.3
       user: $PUID:$PGID
       phase: post_up
       network: $APP_NET
