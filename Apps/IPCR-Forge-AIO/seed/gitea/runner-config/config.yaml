@@ -18,6 +18,7 @@ runner:
   # node, bash, git and the docker CLI with buildx, so marketplace actions (actions/checkout,
   # docker/build-push-action, ...) run as they do on GitHub.
   labels:
+    - "ipcr:docker://docker.gitea.com/runner-images:ubuntu-latest"
     - "ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest"
     - "ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04"
     - "ubuntu-22.04:docker://docker.gitea.com/runner-images:ubuntu-22.04"

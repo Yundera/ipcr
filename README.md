@@ -20,7 +20,7 @@ file that uses it works on any host running IPCR, and the image comes from which
 - **[docs/design.md](docs/design.md)**: why it is built this way, findings, open items.
 - **[docs/naming.md](docs/naming.md)**: image names: IPNS keys, publishers, DNSLink, ENS (`example.eth`), and options studied.
 - **[IPCR Forge](https://github.com/Yundera/ipcr-forge)** (add-on, submodule `ipcr-forge/`): Gitea + Actions → IPFS, public repositories mirrored to Radicle, admin pages, public front door. What it relies on here: [design.md, contract with add-ons](docs/design.md#contract-with-add-ons).
-- **[Apps/](Apps/)**: the IPCR app store (Yundera AppStore listings): IPCR, IPCR-Demo, IPCR-Forge, and the Gitea and Radicle apps the forge is built from.
+- **[Apps/](Apps/)**: the IPCR app store (Yundera AppStore listings): IPCR, IPCR-Demo, IPCR-Forge (uses the Gitea app, and the Radicle app if installed), IPCR-Forge-AIO (bundles both), and the Gitea and Radicle apps.
 
 ## Install
 
@@ -124,7 +124,7 @@ docker compose run --rm cli ipcr push <image> [<app>[:<tag>]]
 gateway/         ipcrd — the IPCR gateway (Go, stdlib only)
 bin/             entrypoint (roles: gateway | registry | ipcr) and the ipcr CLI
 Dockerfile       one image for every role: ghcr.io/yundera/ipcr
-Apps/            the IPCR app store: IPCR, IPCR-Demo, IPCR-Forge, Gitea, Radicle; listing: compose, rationale, seed, assets
+Apps/            the IPCR app store: IPCR, IPCR-Demo, IPCR-Forge, IPCR-Forge-AIO, Gitea, Radicle; listing: compose, rationale, seed, assets
 ipcr-forge/      the IPCR Forge add-on (git submodule, github.com/Yundera/ipcr-forge)
 docs/            spec and design notes
 ```

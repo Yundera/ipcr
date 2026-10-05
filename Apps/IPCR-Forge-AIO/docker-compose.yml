@@ -1,41 +1,37 @@
-name: ipcr-forge
+name: ipcr-forge-aio
 
-# IPCR Forge — a forge whose images are served from IPFS and whose code is mirrored to Radicle,
-# built on the store's Gitea app and (optionally) its Radicle app:
+# IPCR Forge — a forge whose images are served from IPFS and whose code is mirrored to Radicle:
 #
 #   git push origin main v1.2.3                               (developer, plain git)
-#     → gitea  (the Gitea app)             the source of truth: repositories, PRs, issues, users
-#     → forge-runner (act_runner)          Gitea Actions: jobs with `runs-on: ipcr`
+#     → gitea                              the source of truth: repositories, PRs, issues, users
+#     → forge-runner (act_runner)          Gitea Actions: .gitea/workflows/ for the tag
 #     → forge-registry                     staging: localhost:5000/<owner>/<repo>:1.2.3 (internal only)
 #     → ipcr-gateway follows that registry imports every tag into IPFS, publishes IPNS
 #     → ipcr-kubo / ipcr-registry
 #   docker pull ipcr.localhost:4767/ipns/<forge name>/<owner>/<repo>:1.2.3   (anyone)
 #
-#   gitea ──system webhook──▶ ipcr-forge ──rad init / git push rad──▶ radicle-node (the Radicle app)
-#     every PUBLIC repository, one way, once the Radicle app is installed.
+#   gitea ──system webhook──▶ ipcr-forge ──rad init / git push rad──▶ radicle-node
+#     every PUBLIC repository, one way: Radicle is a distribution mirror signed by this node.
 #
-# What this listing expects, and nothing else (see docs/forge.md in ipcr-forge, "Two listings"):
-#   - the Gitea app: `gitea:3000` on the shared network; it allows webhooks to `ipcr-forge`.
-#     forge-setup signs in once as FORGE_GITEA_ADMIN / FORGE_GITEA_PASSWORD (default gitea_admin and
-#     the server's app password) to mint the forge's tokens, its webhook, its OAuth2 app and this
-#     runner's registration token. Without Gitea, the forge's page says so; nothing else breaks.
-#   - the Radicle app, optional: its home, /DATA/AppData/radicle/home, mounted into the forge
-#     service (Radicle's API is read-only: creating and pushing repositories takes the node's own
-#     key, storage and control socket). Without it, nothing is mirrored until it is installed.
+# The tile opens Gitea. ipcr-forge-<domain> is the forge's own page, served by the forge service: how to
+# publish, the published images with the `image:` line to use, and the Radicle mirrors.
 #
-# IPCR is bundled, from Apps/IPCR (its configuration is the forge's), so this app cannot sit beside
-# the IPCR app, nor beside IPCR-Forge-AIO (the same, with Gitea and Radicle bundled).
+# Gitea, Radicle and IPCR services are copied from their standalone listings (Apps/Gitea,
+# Apps/Radicle, Apps/IPCR), so each keeps its own comments and rationale.md; the differences are
+# marked "Forge:". Data folders move, one subfolder per part: $AppID/{gitea,radicle,forge,ci,ipcr}/.
+#
+# Replaces the Gitea, Radicle and IPCR apps; it cannot sit beside them. It uses the same container
+# names, domains (gitea-, radicle-, radicle-api-) and host ports (8776, 4768, 127.0.0.1:4767).
 #
 # The handoff from CI to IPFS is a pull, run by IPCR: jobs run in the forge's own Docker daemon,
 # which cannot reach ipcr.localhost (the *host's* loopback). So a workflow pushes to the staging
 # registry, which shares that daemon's network namespace and is therefore `localhost:5000` to
-# every job, and ipcr-gateway polls it over ci-internal. Only this forge's runner sees it: hence
-# its own label, `ipcr`, beside the Gitea app's runner and its usual labels.
+# every job, and ipcr-gateway polls it over ci-internal.
 
 services:
   # ═══ Bridge — the forge's page, and Gitea → Radicle ════════════════════════════
   # ipcr-forge (forge/ in github.com/Yundera/ipcr-forge). Receives Gitea's system webhook on :8081
-  # (internal: no Caddy route) and mirrors every public repository to the Radicle app's node,
+  # (internal: no Caddy route) and mirrors every public repository to the Radicle node below,
   # with the stock `rad` CLI against the node's own home. Serves the forge's page on :8080.
   # Its install step (forge-setup, below) mints its Gitea token and registers the webhook.
   ipcr-forge:
@@ -78,11 +74,10 @@ services:
       # HOME for git and rad.
       - /tmp
     volumes:
-      # The Radicle app's node home: its storage (where repositories are created and pushed), its
-      # control socket (announces) and its key, which signs everything it publishes. The same mount
-      # the Radicle app's radicle-api has. Empty until that app is installed: the forge then
-      # mirrors nothing, and says so on its page.
-      - ${DATA_ROOT:-/DATA}/AppData/radicle/home/:/radicle-home/
+      # The node's home: its storage (where repositories are created and pushed), its control
+      # socket (announces) and its key, which signs everything it publishes. The same mount
+      # radicle-api has.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/home/:/radicle-home/
       # repos.json (Gitea repository → Radicle ID) and one bare mirror per repository.
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/forge/state:/forge
       # The Gitea token and the webhook secret the install step writes. Read-only here.
@@ -92,6 +87,9 @@ services:
       # Kubo's keystore, read-only: the publisher key, for encrypted backups (Kubo exports keys
       # from its CLI only, and ipcrd, root without capabilities, cannot read a $PUID 0700 folder).
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/ipcr/kubo/keystore:/srv/ipcr-keystore:ro
+    depends_on:
+      - gitea
+      - radicle-node
     healthcheck:
       test: ["CMD", "ipcr-forge", "health"]
       interval: 30s
@@ -115,11 +113,87 @@ services:
       # To IPCR's admin API only.
       - ipcr-admin
 
+  # ═══ Gitea — the source of truth ═══════════════════════════════════════════════
+  # From Apps/Gitea; its data folder moves to $AppID/gitea/.
+
+  # Gitea itself — git hosting, the Actions controller, and the OCI package
+  # registry, all in one process. SQLite: a personal forge never has the write
+  # concurrency that would justify a second container for Postgres.
+  gitea:
+    image: gitea/gitea:1.27.3-rootless
+    container_name: gitea
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 70
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      TZ: $TZ
+      # Every URL Gitea hands out — clone URLs, the registry host, and the
+      # server_url the CI runner passes to jobs — is derived from ROOT_URL, so
+      # it has to be the address that works from outside as well as inside.
+      GITEA__server__ROOT_URL: https://gitea-${APP_DOMAIN}/
+      GITEA__server__DOMAIN: gitea-${APP_DOMAIN}
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__PROTOCOL: http
+      # The address Gitea's own CLI uses to reach the running server's internal
+      # API. It defaults to localhost, which is right for the server itself and
+      # useless from the init container that runs
+      # `gitea actions generate-runner-token`. It has to be set here rather than
+      # there: the CLI reads it out of the shared app.ini, and only this
+      # container's entrypoint renders environment into app.ini.
+      GITEA__server__LOCAL_ROOT_URL: http://gitea:3000/
+      # Git over SSH would need a published host port of its own. Everything
+      # here — clone, push, CI, registry — goes over HTTPS instead.
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__server__START_SSH_SERVER: "false"
+      # Skips the first-run install wizard: every value it would ask for is set
+      # here, and the admin account is created by an init step below.
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__database__PATH: /var/lib/gitea/data/gitea.db
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "true"
+      GITEA__actions__ENABLED: "true"
+      # Where a bare `uses: actions/checkout@v4` is resolved from.
+      GITEA__actions__DEFAULT_ACTIONS_URL: github
+      # Forge: off. Images go to the staging registry that IPCR follows; a second registry would
+      # be a second place an image could be published from.
+      GITEA__packages__ENABLED: "false"
+      # Forge: webhooks may reach the forge service (ipcr-forge, on this server's network) and, as by
+      # default, any public address. Not `private`: that would let any user's webhook reach every
+      # container on the shared network.
+      GITEA__webhook__ALLOWED_HOST_LIST: external,ipcr-forge
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/data:/var/lib/gitea
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/config:/etc/gitea
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    expose:
+      - 3000
+    labels:
+      caddy_0: gitea-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 3000}}"
+      caddy_1: gitea-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 3000}}"
+      caddy_2: gitea-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 3000}}"
+    networks:
+      - pcs
+
   # ═══ CI — Gitea Actions ════════════════════════════════════════════════════════
 
   # The runner: act_runner (plain, not its -dind variant) driving the separate daemon below over a
   # unix socket. Runs unprivileged; whoever controls it controls that daemon, which is the point.
-  # Its config (seed/runner-config/config.yaml) puts jobs on the daemon's host network, where
+  # Its config (seed/gitea/runner-config/config.yaml) puts jobs on the daemon's host network, where
   # the staging registry is localhost:5000.
   forge-runner:
     image: gitea/act_runner:0.6.1
@@ -129,8 +203,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     # The stock run.sh reads the registration token once and gives up after 10 tries; the token is
-    # fetched from Gitea's API by forge-setup, which runs after the stack is up (and only once the
-    # Gitea app answers). So wait for it (or for an
+    # minted by an install step that runs after the stack is up. So wait for it (or for an
     # existing registration) first.
     entrypoint:
       - /sbin/tini
@@ -156,17 +229,19 @@ services:
       # `gitea` does not resolve: checkout goes out and back over HTTPS.
       GITEA_INSTANCE_URL: https://gitea-${APP_DOMAIN}
       GITEA_RUNNER_REGISTRATION_TOKEN_FILE: /data/token
-      GITEA_RUNNER_NAME: ipcr-forge-runner
+      GITEA_RUNNER_NAME: forge-runner
       # Registration-time labels; runner-config/config.yaml repeats them and wins on every start.
-      # `ipcr` only: ordinary CI stays on the Gitea app's own runner (gitea-runner).
-      GITEA_RUNNER_LABELS: ipcr:docker://docker.gitea.com/runner-images:ubuntu-latest
+      # `ipcr` is the forge's own label (the example and the split listing use it); the usual ones
+      # too, as this is the only runner here.
+      GITEA_RUNNER_LABELS: ipcr:docker://docker.gitea.com/runner-images:ubuntu-latest,ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest,ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04,ubuntu-22.04:docker://docker.gitea.com/runner-images:ubuntu-22.04
       CONFIG_FILE: /config/config.yaml
     volumes:
-      # .runner (this runner's registration) and the registration token forge-setup leaves.
-      - ${DATA_ROOT:-/DATA}/AppData/$AppID/runner:/data
-      - ${DATA_ROOT:-/DATA}/AppData/$AppID/runner-config:/config:ro
+      # .runner (this runner's registration) and the registration token the init step leaves.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/runner:/data
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/gitea/runner-config:/config:ro
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/ci/socket:/run/dind
     depends_on:
+      - gitea
       - forge-docker
     networks:
       # Egress: it polls Gitea through its public address, like the jobs.
@@ -269,6 +344,133 @@ services:
     volumes:
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/ci/registry:/var/lib/registry
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/ci/registry-socket:/run/staging
+
+  # ═══ Radicle — the public mirror ═══════════════════════════════════════════════
+  # Verbatim from Apps/Radicle; only its data folder moves to $AppID/radicle/. The forge service
+  # creates and pushes repositories in this node's storage; the node replicates them.
+
+  # The web UI: the Radicle Explorer bundle served as static files by Caddy.
+  # It is a pure client-side app — every request it makes goes from the visitor's
+  # browser straight to the API below, which is why that one needs its own domain.
+  radicle:
+    image: dirk1980/radicle-explorer-container@sha256:0e31485c38a765e83a10b1a4bf71b12d4f9fec630881d171bba736a4a56a16ce
+    container_name: radicle
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 80
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      TZ: $TZ
+      # Caddy writes its autosaved config and its (unused here) certificate store
+      # under these two paths. The image points them at /config and /data, which are
+      # root-owned, so as $PUID the process cannot create them and refuses to start.
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      XDG_DATA_HOME: /tmp/caddy-data
+    volumes:
+      # Replaces the image's own :80 Caddyfile — see the comments in that file.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    expose:
+      - 8080
+    labels:
+      caddy_0: radicle-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy_1: radicle-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 8080}}"
+      caddy_2: radicle-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 8080}}"
+    networks:
+      - pcs
+
+  # radicle-httpd — the node's read-only JSON API, on its own domain.
+  #
+  # This domain is deliberately NOT behind the SSO gate: the explorer above is a
+  # static bundle running in the visitor's browser, so it is the browser that calls
+  # this API, cross-origin. The daemon serves public repositories only (private ones
+  # are filtered out upstream) and has no write endpoints at all. See rationale.md.
+  radicle-api:
+    image: dirk1980/radicle-httpd@sha256:5e95be30e4bde55b509a65fd56f8b825cafd0f5cd752c1a13e79aad75b958895
+    container_name: radicle-api
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 70
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    command: ["--listen", "0.0.0.0:8080"]
+    environment:
+      TZ: $TZ
+    volumes:
+      # Same Radicle home as the node: the daemon reads the repository storage
+      # directly and talks to the node over the control socket inside it.
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/home/:/radicle-home/
+    healthcheck:
+      # curl, not wget: this image carries curl and no busybox.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/v1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    expose:
+      - 8080
+    labels:
+      caddy_0: radicle-api-${APP_DOMAIN}
+      caddy_0.import: gateway_tls
+      caddy_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy_1: radicle-api-${APP_PUBLIC_IP_DASH}.nip.io
+      caddy_1.import: gateway_tls
+      caddy_1.reverse_proxy: "{{upstreams 8080}}"
+      caddy_2: radicle-api-${APP_PUBLIC_IP_DASH}.sslip.io
+      caddy_2.reverse_proxy: "{{upstreams 8080}}"
+    networks:
+      - pcs
+
+  # The node itself: speaks the Radicle peer-to-peer protocol (gossip, fetch,
+  # announce) on TCP 8776. No HTTP, so no Caddy route and no place on the shared
+  # network — it only needs egress, which the app-internal bridge provides.
+  radicle-node:
+    image: dirk1980/radicle-seed-node@sha256:78ccee526ad4b4f4d7c79c2323b032a7209858a48e1dc9c077272ff1660050e2
+    container_name: radicle-node
+    user: $PUID:$PGID
+    restart: unless-stopped
+    cpu_shares: 50
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      TZ: $TZ
+    volumes:
+      - ${DATA_ROOT:-/DATA}/AppData/$AppID/radicle/home/:/radicle-home/
+    ports:
+      # Radicle peer-to-peer protocol. Other nodes dial in here to fetch the
+      # repositories this node seeds; without it the node still syncs outbound,
+      # but nobody can fetch from it. Hence the needs-public-ip tag.
+      - "8776:8776"
+    healthcheck:
+      # `rad node status` round-trips the node's control socket, which is the only
+      # liveness signal this container has — but it also renders the peer table, and
+      # that takes 3-8s on an idle node and longer while the node is syncing. Hence
+      # the unusually generous timeout: a 10s one fails during the first sync and
+      # flaps the container between healthy and unhealthy.
+      test: ["CMD", "rad", "node", "status"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 90s
+    networks:
+      - radicle-internal
 
   # ═══ IPCR — the IPFS container registry ════════════════════════════════════════
   # Verbatim from Apps/IPCR; only its data folder moves to $AppID/ipcr/.
@@ -491,6 +693,9 @@ networks:
   pcs:
     name: ${APP_NET:-pcs}
     external: true
+  # From Apps/Radicle: egress only, for the node.
+  radicle-internal:
+    driver: bridge
   # CI: the runner ↔ its daemon (and staging registry) ↔ ipcr-gateway; egress for builds.
   ci-internal:
     driver: bridge
@@ -502,11 +707,10 @@ networks:
     driver: bridge
     internal: true
 
-
 x-casaos:
   architectures:
     - amd64
-  main: ipcr-forge
+  main: gitea
   author: Yundera
   developer: Yundera
   category: Developer
@@ -517,69 +721,53 @@ x-casaos:
     - screenshot-2.png
     - screenshot-3.png
   title:
-    en_us: IPCR Forge
+    en_us: IPCR Forge (all in one)
   tagline:
-    en_us: Your Gitea's releases, served from IPFS; its code mirrored to Radicle.
-    fr_fr: Les versions de votre Gitea servies depuis IPFS, son code répliqué sur Radicle.
+    en_us: Gitea with Actions, images served from IPFS, code mirrored to Radicle.
+    fr_fr: Gitea avec Actions, images servies depuis IPFS, code répliqué sur Radicle.
   description:
     en_us: |
-      IPCR Forge turns the **Gitea** app into a forge whose releases do not depend on it staying
-      online:
+      IPCR Forge is a git forge whose releases do not depend on it staying online:
 
-      • **IPCR** publishes every image your Gitea workflows build on IPFS, so any server running
-        IPCR can `docker pull` it by name, from whichever peers hold it.
-      • With the **Radicle** app installed too, every public repository is copied, signed by this
-        server, to Radicle's peer-to-peer network: anyone can clone it, even when this server is
-        down.
+      • **Gitea** is where you work: repositories, pull requests, issues, and GitHub-style Actions.
+        Push with plain `git`.
+      • **IPCR** publishes every image your workflows build on IPFS, so any server running IPCR
+        can `docker pull` it by name, from whichever peers hold it.
+      • **Radicle** receives a copy of every public repository, signed by this server, on its
+        peer-to-peer network: anyone can clone it, even when this server is down.
 
-      **Requires the Gitea app.** Radicle is optional, and can be added later. Already running
-      neither? **IPCR Forge (all in one)** bundles both.
+      A repository publishes images by committing a workflow under `.gitea/workflows/` that
+      pushes to `localhost:5000`. The install creates an example, `ipcr-hello`: create a tag on it
+      in Gitea and watch the whole chain run.
 
-      A repository publishes images by committing a workflow under `.gitea/workflows/` that runs
-      on `ipcr` and pushes to `localhost:5000`. The install creates an example, `ipcr-hello`:
-      create a tag on it in Gitea and watch the whole chain run.
+      The forge's own page explains how to publish, lists every published image with the line to
+      put in a compose file, and every repository mirrored to Radicle.
 
-      The forge's own page (it opens from the tile) explains how to publish, lists every published
-      image with the line to put in a compose file, and every repository mirrored to Radicle.
-
-      This app bundles IPCR: install it instead of the IPCR app, not beside it.
+      This app bundles the Gitea, Radicle and IPCR apps. Install it instead of them, not beside them.
+      Already running Gitea (and Radicle)? Install **IPCR Forge** instead: it uses those apps.
     fr_fr: |
-      IPCR Forge fait de l'application **Gitea** une forge dont les versions publiées ne dépendent
-      pas de sa disponibilité :
+      IPCR Forge est une forge git dont les versions publiées ne dépendent pas de sa disponibilité :
 
-      • **IPCR** publie sur IPFS chaque image construite par vos workflows Gitea : tout serveur
-        équipé d'IPCR peut la `docker pull` par son nom, depuis les pairs qui la détiennent.
-      • Avec l'application **Radicle** installée aussi, chaque dépôt public est copié, signé par ce
-        serveur, sur le réseau pair-à-pair Radicle : n'importe qui peut le cloner, même quand ce
-        serveur est arrêté.
+      • **Gitea** est l'endroit où l'on travaille : dépôts, pull requests, tickets, et Actions au
+        format GitHub. On pousse avec `git`, tout simplement.
+      • **IPCR** publie sur IPFS chaque image construite par vos workflows : tout serveur équipé
+        d'IPCR peut la `docker pull` par son nom, depuis les pairs qui la détiennent.
+      • **Radicle** reçoit une copie de chaque dépôt public, signée par ce serveur, sur son réseau
+        pair-à-pair : n'importe qui peut la cloner, même quand ce serveur est arrêté.
 
-      **Nécessite l'application Gitea.** Radicle est facultatif, et peut être ajouté plus tard.
-      Aucune des deux installée ? **IPCR Forge (all in one)** les regroupe.
+      Un dépôt publie des images en ajoutant un workflow sous `.gitea/workflows/` qui pousse vers
+      `localhost:5000`. L'installation crée un exemple, `ipcr-hello` : créez-y un tag dans Gitea et
+      regardez toute la chaîne s'exécuter.
 
-      Un dépôt publie des images en ajoutant un workflow sous `.gitea/workflows/` qui tourne sur
-      `ipcr` et pousse vers `localhost:5000`. L'installation crée un exemple, `ipcr-hello` :
-      créez-y un tag dans Gitea et regardez toute la chaîne s'exécuter.
+      La page de la forge explique comment publier, liste chaque image publiée avec la ligne à
+      mettre dans un fichier compose, et chaque dépôt répliqué sur Radicle.
 
-      La page de la forge (elle s'ouvre depuis la tuile) explique comment publier, liste chaque
-      image publiée avec la ligne à mettre dans un fichier compose, et chaque dépôt répliqué sur
-      Radicle.
-
-      Cette application regroupe IPCR : installez-la à la place de l'application IPCR, pas à côté.
+      Cette application regroupe les applications Gitea, Radicle et IPCR. Installez-la à leur
+      place, pas à côté. Gitea (et Radicle) déjà installés ? Installez plutôt **IPCR Forge** : elle
+      utilise ces applications.
   tips:
     before_install:
       en_us: |
-        **Install the Gitea app first.** This forge uses it: its repositories, its users, its
-        Actions. The forge signs in once as `gitea_admin` with your default app password; if you
-        changed it, set `FORGE_GITEA_ADMIN` / `FORGE_GITEA_PASSWORD` in this app's settings (a Gitea
-        site administrator). The forge's page says when it cannot reach or sign in to Gitea.
-
-        **Radicle is optional.** Install the Radicle app, before or after, and every public
-        repository is mirrored within ten minutes. Without it, nothing is mirrored.
-
-        **Workflows run on `ipcr`.** This forge brings its own runner, the only one that reaches the
-        staging registry; the Gitea app's runner keeps the usual labels (`ubuntu-latest`, …) for
-        ordinary CI. A publishing workflow says `runs-on: ipcr` (the example does).
-
         **Start here: [the forge's page](https://ipcr-forge-$APP_DOMAIN)**: how to publish, the
         published images, the Radicle mirrors.
 
@@ -589,21 +777,24 @@ x-casaos:
         Download one after the first release: the key exists only on this server, and losing it
         loses every image name.
 
-        **Replaces the IPCR app** (same addresses and ports): uninstall it first.
+        **Replaces three apps.** Uninstall Gitea, Radicle and IPCR first: this app uses the same
+        addresses and ports.
 
         | Address | What |
         | --- | --- |
-        | `https://ipcr-forge-$APP_DOMAIN` | The forge's page (opens from the tile, public) |
-        | `https://gitea-$APP_DOMAIN` | Gitea (the Gitea app) |
+        | `https://gitea-$APP_DOMAIN` | Gitea (opens from the tile). Sign in as `gitea_admin` with your default app password |
+        | `https://ipcr-forge-$APP_DOMAIN` | The forge's page (public) |
         | `ipcr-$APP_DOMAIN` | `docker pull` this forge's images from anywhere, without IPCR (read-only) |
+        | `https://radicle-$APP_DOMAIN` | Radicle explorer (public) |
+        | `https://radicle-api-$APP_DOMAIN` | Radicle API and read-only git (public) |
         | `ipcr.localhost:4767` | IPCR registry, this server's Docker only |
 
-        **Ports.** 4768 TCP+UDP (IPFS peers) is published.
+        **Ports.** TCP 8776 (Radicle peers) and 4768 TCP+UDP (IPFS peers) are published.
 
-        **Public repositories go to Radicle** once the Radicle app is installed. Every public Gitea
-        repository is copied there, signed by this server, within seconds of each push. That cannot
-        be undone: making a repository private later stops the copy, and what was published stays
-        on the network. Private repositories are never copied.
+        **Public repositories go to Radicle.** Every public Gitea repository is copied there, signed
+        by this server, within seconds of each push. That cannot be undone: making a repository
+        private later stops the copy, and what was published stays on the network. Private
+        repositories are never copied.
 
         **Who can publish images.** Each public repository (switched on in the admin pages: all are,
         by default) publishes under its own name, `<owner>/<repo>`: its workflow logs in to the
@@ -613,20 +804,6 @@ x-casaos:
         CI runs on a privileged Docker daemon: only give write access to people you trust with the
         server.
       fr_fr: |
-        **Installez d'abord l'application Gitea.** Cette forge l'utilise : ses dépôts, ses
-        utilisateurs, ses Actions. La forge s'y connecte une fois comme `gitea_admin` avec votre mot
-        de passe d'applications par défaut ; si vous l'avez changé, renseignez `FORGE_GITEA_ADMIN` /
-        `FORGE_GITEA_PASSWORD` dans les réglages de cette application (un administrateur du site
-        Gitea). La page de la forge signale quand elle ne peut pas joindre Gitea ou s'y connecter.
-
-        **Radicle est facultatif.** Installez l'application Radicle, avant ou après, et chaque dépôt
-        public est répliqué dans les dix minutes. Sans elle, rien n'est répliqué.
-
-        **Les workflows tournent sur `ipcr`.** Cette forge apporte son propre runner, le seul qui
-        atteint le registre de transit ; celui de l'application Gitea garde les étiquettes
-        habituelles (`ubuntu-latest`, …) pour la CI ordinaire. Un workflow de publication indique
-        `runs-on: ipcr` (l'exemple le fait).
-
         **Commencez ici : [la page de la forge](https://ipcr-forge-$APP_DOMAIN)** : publier, les
         images publiées, les copies Radicle.
 
@@ -636,21 +813,24 @@ x-casaos:
         clé de publication**. Téléchargez-en une après la première version : la clé n'existe que
         sur ce serveur, et la perdre fait perdre tous les noms d'images.
 
-        **Remplace l'application IPCR** (mêmes adresses et ports) : désinstallez-la d'abord.
+        **Remplace trois applications.** Désinstallez d'abord Gitea, Radicle et IPCR : cette
+        application utilise les mêmes adresses et ports.
 
         | Adresse | Quoi |
         | --- | --- |
-        | `https://ipcr-forge-$APP_DOMAIN` | La page de la forge (s'ouvre depuis la tuile, publique) |
-        | `https://gitea-$APP_DOMAIN` | Gitea (l'application Gitea) |
+        | `https://gitea-$APP_DOMAIN` | Gitea (s'ouvre depuis la tuile). Connexion : `gitea_admin` et votre mot de passe d'applications par défaut |
+        | `https://ipcr-forge-$APP_DOMAIN` | La page de la forge (publique) |
         | `ipcr-$APP_DOMAIN` | `docker pull` des images de cette forge depuis n'importe où, sans IPCR (lecture seule) |
+        | `https://radicle-$APP_DOMAIN` | Explorateur Radicle (public) |
+        | `https://radicle-api-$APP_DOMAIN` | API Radicle et git en lecture seule (public) |
         | `ipcr.localhost:4767` | Registre IPCR, pour le Docker de ce serveur uniquement |
 
-        **Ports.** 4768 TCP+UDP (pairs IPFS) est publié.
+        **Ports.** TCP 8776 (pairs Radicle) et 4768 TCP+UDP (pairs IPFS) sont publiés.
 
-        **Les dépôts publics partent sur Radicle** une fois l'application Radicle installée. Chaque
-        dépôt public de Gitea y est copié, signé par ce serveur, quelques secondes après chaque
-        push. C'est irréversible : rendre un dépôt privé ensuite arrête la copie, et ce qui a été
-        publié reste sur le réseau. Les dépôts privés ne sont jamais copiés.
+        **Les dépôts publics partent sur Radicle.** Chaque dépôt public de Gitea y est copié, signé
+        par ce serveur, quelques secondes après chaque push. C'est irréversible : rendre un dépôt
+        privé ensuite arrête la copie, et ce qui a été publié reste sur le réseau. Les dépôts privés
+        ne sont jamais copiés.
 
         **Qui peut publier des images.** Chaque dépôt public (activé dans l'administration : tous,
         par défaut) publie sous son propre nom, `<propriétaire>/<dépôt>` : son workflow se connecte
@@ -660,8 +840,8 @@ x-casaos:
         secrets. La CI tourne sur un démon Docker privilégié : ne donnez l'accès en écriture qu'à des
         personnes à qui vous confiez le serveur.
   index: /
-  webui_port: 8080
-  store_app_id: ipcr-forge
+  webui_port: 3000
+  store_app_id: ipcr-forge-aio
 
 x-compose-app:
   schema_version: 2
@@ -678,21 +858,25 @@ x-compose-app:
     - path: /DATA/AppData/$AppID/forge/state/gate
       user: $PUID
       group: $PGID
-    # ── Radicle (the Radicle app's) ──
-    # The Radicle app's home, which the forge service mounts. Created here, as $PUID, so that Docker
-    # does not create it as root when the Radicle app is not installed yet: its install step
-    # (`rad auth`, as $PUID) could then not write the node's key. Outside this app's folder, so
-    # uninstalling the forge leaves it alone.
-    - path: /DATA/AppData/radicle/home
+    # ── Gitea ──
+    - path: /DATA/AppData/$AppID/gitea/data
       user: $PUID
       group: $PGID
-    # ── CI runner ──
-    # Holds .runner (the runner's registration) and the token forge-setup leaves.
-    - path: /DATA/AppData/$AppID/runner
+    - path: /DATA/AppData/$AppID/gitea/config
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/gitea/runner
       user: $PUID
       group: $PGID
       mode: "0700"
-    - path: /DATA/AppData/$AppID/runner-config
+    - path: /DATA/AppData/$AppID/gitea/runner-config
+      user: $PUID
+      group: $PGID
+    # ── Radicle ──
+    - path: /DATA/AppData/$AppID/radicle/home
+      user: $PUID
+      group: $PGID
+    - path: /DATA/AppData/$AppID/radicle/caddy
       user: $PUID
       group: $PGID
     # ── CI daemon ──
@@ -729,9 +913,18 @@ x-compose-app:
       user: $PUID
       group: $PGID
   files:
-    # Both follow store updates (re-rendered on every up).
-    - path: /DATA/AppData/$AppID/runner-config/config.yaml
-      from: runner-config/config.yaml
+    # Each entry and its reason are in the standalone listing it comes from. All follow store
+    # updates (re-rendered on every up).
+    - path: /DATA/AppData/$AppID/gitea/runner-config/config.yaml
+      from: gitea/runner-config/config.yaml
+      ensure: always
+      mode: "0644"
+    - path: /DATA/AppData/$AppID/radicle/home/config.json
+      from: radicle/home/config.json.tmpl
+      ensure: always
+      mode: "0644"
+    - path: /DATA/AppData/$AppID/radicle/caddy/Caddyfile
+      from: radicle/caddy/Caddyfile.tmpl
       ensure: always
       mode: "0644"
     - path: /DATA/AppData/$AppID/ipcr/init.d/01-ipcr-node.sh
@@ -739,13 +932,53 @@ x-compose-app:
       ensure: always
       mode: "0755"
   init:
+    # In order: Radicle's identity before its node starts, then Gitea's admin, then the runner
+    # token and the forge service's setup, which both need that admin to exist.
+    - name: radicle-identity
+      image: dirk1980/radicle-seed-node@sha256:78ccee526ad4b4f4d7c79c2323b032a7209858a48e1dc9c077272ff1660050e2
+      user: $PUID:$PGID
+      volumes:
+        - /DATA/AppData/$AppID/radicle/home:/radicle-home
+      command: ["sh", "-c", "yes '' | rad auth --alias radicle-${APP_PUBLIC_IP_DASH} --stdin"]
+      when: absent:/DATA/AppData/$AppID/radicle/home/keys/radicle
+    - name: gitea-admin
+      image: gitea/gitea:1.27.3-rootless
+      user: $PUID:$PGID
+      phase: post_up
+      volumes:
+        - /DATA/AppData/$AppID/gitea/data:/var/lib/gitea
+        - /DATA/AppData/$AppID/gitea/config:/etc/gitea
+      command:
+        - sh
+        - -c
+        - |
+          timeout 240 sh -c 'until gitea admin user list >/dev/null 2>&1; do sleep 3; done'
+          gitea admin user create --admin --username gitea_admin \
+            --password "$APP_DEFAULT_PASSWORD" --email "$APP_EMAIL" \
+            --must-change-password=false \
+            || echo "admin account already present, leaving it alone"
+      when: always
+    - name: gitea-runner-token
+      image: gitea/gitea:1.27.3-rootless
+      user: $PUID:$PGID
+      phase: post_up
+      network: $APP_NET
+      volumes:
+        - /DATA/AppData/$AppID/gitea/data:/var/lib/gitea
+        - /DATA/AppData/$AppID/gitea/config:/etc/gitea
+        - /DATA/AppData/$AppID/gitea/runner:/runner
+      command:
+        - sh
+        - -c
+        - |
+          timeout 240 sh -c 'until gitea actions generate-runner-token > /runner/token.new 2>/dev/null; do sleep 3; done'
+          mv /runner/token.new /runner/token
+          chmod 600 /runner/token
+      when: absent:/DATA/AppData/$AppID/gitea/runner/.runner
     # The forge service's Gitea tokens (public-only read; and write:repository for push secrets), the
-    # webhook secret, the system webhook, the admin pages' OAuth2 app, the root organisation, the
-    # example repository (in that organisation) and, until the runner is registered, its
-    # registration token (Gitea's API: this app cannot run `gitea` on the Gitea app's volume).
-    # Idempotent, so on every start: it repairs the webhook. The admin password is used here only,
-    # never stored. Waits up to 240s for the Gitea app, then records why it could not go on
-    # (forge/secrets/setup-status, shown on the forge's page) and lets the start finish.
+    # webhook secret, the system webhook, the admin pages' OAuth2 app, the root organisation and
+    # the example repository (in that organisation). Idempotent, so on every start: it repairs the webhook.
+    # The admin password is used here only, never stored.
     - name: forge-setup
       image: ghcr.io/yundera/ipcr-forge:0.6.0
       user: $PUID:$PGID
@@ -753,11 +986,10 @@ x-compose-app:
       network: $APP_NET
       volumes:
         - /DATA/AppData/$AppID/forge/secrets:/secrets
-        - /DATA/AppData/$AppID/runner:/runner
       command:
         - sh
         - -c
-        - GITEA_OWNER="${FORGE_GITEA_ADMIN:-gitea_admin}" GITEA_PASSWORD="${FORGE_GITEA_PASSWORD:-$APP_DEFAULT_PASSWORD}" GITEA_URL=http://gitea:3000 RUNNER_DIR=/runner IPCR_ROOT_ORG="${IPCR_ROOT_ORG:-}" PUBLIC_HOSTS="ipcr-forge-$APP_DOMAIN,ipcr-forge-$APP_PUBLIC_IP_DASH.nip.io,ipcr-forge-$APP_PUBLIC_IP_DASH.sslip.io" ipcr-forge setup
+        - GITEA_OWNER="${FORGE_GITEA_ADMIN:-gitea_admin}" GITEA_PASSWORD="${FORGE_GITEA_PASSWORD:-$APP_DEFAULT_PASSWORD}" GITEA_URL=http://gitea:3000 IPCR_ROOT_ORG="${IPCR_ROOT_ORG:-}" PUBLIC_HOSTS="ipcr-forge-$APP_DOMAIN,ipcr-forge-$APP_PUBLIC_IP_DASH.nip.io,ipcr-forge-$APP_PUBLIC_IP_DASH.sslip.io" ipcr-forge setup
       when: always
-  webui-host: ipcr-forge-${domain}
+  webui-host: gitea-${domain}
   webui-path: /

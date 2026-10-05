@@ -53,6 +53,10 @@ services:
       # reacts to a commit that arrives from the mirrored source.
       GITEA__mirror__DEFAULT_INTERVAL: 10m
       GITEA__mirror__MIN_INTERVAL: 10m
+      # Webhooks may reach the IPCR Forge app's service (ipcr-forge, on this server's network) and,
+      # as by default, any public address. The name resolves only when that app is installed. Not
+      # `private`: that would let any user's webhook reach every container on the shared network.
+      GITEA__webhook__ALLOWED_HOST_LIST: external,ipcr-forge
     volumes:
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/data:/var/lib/gitea
       - ${DATA_ROOT:-/DATA}/AppData/$AppID/config:/etc/gitea
