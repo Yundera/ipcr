@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -171,6 +173,29 @@ func credentialsFor(host string) bool {
 	}
 	u, err := url.Parse(w)
 	return err == nil && u.Host == host
+}
+
+// ensureImportAuth creates IMPORT_AUTH_FILE (user ipcr, a random password) when it is missing and
+// IMPORT_AUTH_GENERATE=true: the forge's staging registry gate learns it from that file (read-only
+// mount), so this side never needs to be told a secret. World-readable for the same reason as
+// admin-token (admin.go): root without capabilities cannot hand a file to another uid otherwise.
+func ensureImportAuth() error {
+	f := os.Getenv("IMPORT_AUTH_FILE")
+	if f == "" || os.Getenv("IMPORT_AUTH_GENERATE") != "true" {
+		return nil
+	}
+	if b, err := os.ReadFile(f); err == nil && strings.Contains(string(b), ":") {
+		return nil
+	}
+	b := make([]byte, 24)
+	rand.Read(b)
+	if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(f+".tmp", []byte("ipcr:"+hex.EncodeToString(b)), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(f+".tmp", f)
 }
 
 func importAuth() string {
@@ -754,17 +779,20 @@ func (w *watcher) pass(ctx context.Context) {
 				continue
 			}
 			digests[tag] = dgst
-			done[tag] = w.importTag(ctx, reg, repo, tag, dgst)
+			done[tag] = w.importTag(ctx, reg, cfg, repo, tag, dgst)
 		}
 		if cleanupStaging && complete {
 			w.cleanup(ctx, reg, repo, digests, done)
 		}
 	}
+	if w.publisher != "" {
+		w.syncAliases(ctx, cfg)
+	}
 }
 
 // importTag imports and publishes repo:tag unless it already is (or was unpublished on purpose).
 // It reports whether the tag is settled.
-func (w *watcher) importTag(ctx context.Context, reg *registry, repo, tag, dgst string) bool {
+func (w *watcher) importTag(ctx context.Context, reg *registry, cfg config, repo, tag, dgst string) bool {
 	key := w.stateKey(repo, tag)
 	w.mu.Lock()
 	prev, has := w.state[key], w.pub.has(repo, tag)
@@ -776,7 +804,14 @@ func (w *watcher) importTag(ctx context.Context, reg *registry, repo, tag, dgst 
 	var name string
 	if err == nil {
 		if w.publisher != "" {
-			name, err = publishImage(ctx, w.publisher, repo, tag, root)
+			// Under its own path and, for the root organisation's repositories, its short one.
+			w.mu.Lock()
+			aliases := w.aliases(cfg)[repo]
+			w.mu.Unlock()
+			name, err = publishPaths(ctx, w.publisher, append([]string{repo}, aliases...), tag, root)
+			if err == nil {
+				name += "/" + repo
+			}
 		} else {
 			name, err = tagImage(ctx, strings.ReplaceAll(repo, "/", "-"), tag, root)
 		}
@@ -822,6 +857,111 @@ func (w *watcher) cleanup(ctx context.Context, reg *registry, repo string, diges
 	}
 }
 
+// aliases returns the extra paths each repository is published under (config allow.aliases), less
+// any that would collide: an alias is one path segment at the root of the publisher tree, so it must
+// not be the first segment of another repository's path (an owner's folder), nor be claimed twice.
+// Call with w.mu held.
+func (w *watcher) aliases(cfg config) map[string][]string {
+	taken := map[string]string{} // first segment → repository using it
+	claim := func(seg, repo string) {
+		if _, ok := taken[seg]; !ok {
+			taken[seg] = repo
+		}
+	}
+	for _, r := range cfg.Allow.Repos {
+		claim(strings.SplitN(r, "/", 2)[0], r)
+	}
+	for r := range w.pub.Images {
+		claim(strings.SplitN(r, "/", 2)[0], r)
+	}
+	out := map[string][]string{}
+	used := map[string]bool{}
+	repos := make([]string, 0, len(cfg.Allow.Aliases))
+	for r := range cfg.Allow.Aliases {
+		repos = append(repos, r)
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		for _, a := range cfg.Allow.Aliases[repo] {
+			a = strings.ToLower(a)
+			if !validAlias(a) || used[a] || taken[a] != "" {
+				continue
+			}
+			used[a] = true
+			out[strings.ToLower(repo)] = append(out[strings.ToLower(repo)], a)
+		}
+	}
+	return out
+}
+
+// validAlias: one segment of an image path (see repoRe in admin.go).
+func validAlias(a string) bool { return a != "" && !strings.Contains(a, "/") && repoRe.MatchString(a) }
+
+// syncAliases makes every published repository's short paths match the configuration: a new alias
+// gets every published tag, a dropped one (root organisation changed or switched off) is removed.
+func (w *watcher) syncAliases(ctx context.Context, cfg config) {
+	w.mu.Lock()
+	want := w.aliases(cfg)
+	type change struct {
+		repo      string
+		add, drop []string
+		tags      map[string]string // tag → root
+	}
+	var changes []change
+	for repo, pr := range w.pub.Images {
+		c := change{repo: repo, tags: map[string]string{}}
+		have := map[string]bool{}
+		for _, a := range pr.Aliases {
+			have[a] = true
+		}
+		for _, a := range want[repo] {
+			if !have[a] {
+				c.add = append(c.add, a)
+			}
+			delete(have, a)
+		}
+		for a := range have {
+			c.drop = append(c.drop, a)
+		}
+		if len(c.add)+len(c.drop) == 0 {
+			continue
+		}
+		for tag, t := range pr.Tags {
+			c.tags[tag] = t.CID
+		}
+		changes = append(changes, c)
+	}
+	w.mu.Unlock()
+	for _, c := range changes {
+		_, err := updateTree(ctx, w.publisher, publisherDir(w.publisher), 0, func(base string) error {
+			for _, a := range c.drop {
+				if err := kuboJSON(ctx, "files/rm", url.Values{"arg": {base + "/" + a}, "recursive": {"true"}, "force": {"true"}}, nil); err != nil {
+					return err
+				}
+			}
+			for _, a := range c.add {
+				for tag, root := range c.tags {
+					if err := setTag(ctx, base+"/"+a, tag, root); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("watch: aliases of %s: %v", c.repo, err)
+			continue
+		}
+		log.Printf("watch: %s: short paths %v added, %v removed", c.repo, c.add, c.drop)
+		w.mu.Lock()
+		if pr := w.pub.Images[c.repo]; pr != nil {
+			pr.Aliases = want[c.repo]
+		}
+		w.save()
+		w.mu.Unlock()
+	}
+}
+
 // ---------------------------------------------------------------- configuration
 
 // config is what the admin can change at run time, kept in STATE_DIR/config.json and re-read at
@@ -835,6 +975,9 @@ type config struct {
 		// where an empty list therefore publishes nothing.
 		Required bool     `json:"required"`
 		Repos    []string `json:"repos"`
+		// Extra, shorter paths for some repositories: {"metadec/app": ["app"]} also publishes
+		// metadec/app as /ipns/<publisher>/app (IPCR Forge: its root organisation's repositories).
+		Aliases map[string][]string `json:"aliases,omitempty"`
 	} `json:"allow"`
 }
 
@@ -871,6 +1014,8 @@ type publishedTag struct {
 type publishedRepo struct {
 	IPNS string                  `json:"ipns"`
 	Tags map[string]publishedTag `json:"tags"`
+	// Short paths the same tags are also published under (see config.Allow.Aliases).
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 type published struct {

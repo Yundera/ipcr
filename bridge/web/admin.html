@@ -59,6 +59,27 @@
   .bar { height: 8px; background: var(--code); border-radius: 4px; overflow: hidden; margin: 6px 0; }
   .bar span { display: block; height: 100%; background: var(--accent); }
   .note { border-left: 3px solid var(--warn); padding: 4px 12px; color: var(--muted); margin: 8px 0; }
+  .wide { grid-column: 1 / -1; }
+  /* Names, CIDs and commands stay on one line; their box scrolls instead. */
+  .line { display: block; white-space: nowrap; overflow-x: auto; overflow-wrap: normal; }
+  .copyrow { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .copyrow code { flex: 1; min-width: 0; white-space: nowrap; overflow-x: auto; overflow-wrap: normal; padding: 3px 6px; }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 20px 0 4px; overflow-x: auto; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted);
+    padding: 8px 14px; font-size: 14px; white-space: nowrap; }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .count { font-size: 12px; background: var(--code); border-radius: 10px; padding: 0 7px; margin-left: 4px; }
+  .addrs { list-style: none; padding: 0; margin: 4px 0 0; font-size: 13px; }
+  .addrs li { margin: 2px 0; }
+  .tag { border-top: 1px solid var(--line); padding: 10px 0; }
+  .tag:first-of-type { border-top: 0; }
+  .taghead { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; margin-bottom: 6px; }
+  .cmd { display: grid; grid-template-columns: 44px 1fr auto; gap: 8px; align-items: center; margin: 3px 0; }
+  .cmd .k { font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; }
+  .cmd code { white-space: nowrap; overflow-x: auto; overflow-wrap: normal; padding: 3px 6px; min-width: 0; }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg);
     padding: 8px 14px; border-radius: 8px; font-size: 14px; display: none; max-width: calc(100% - 32px); }
 </style>
@@ -71,33 +92,43 @@
   <button id="logout">Sign out</button>
 </header>
 
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="overview">Overview</button>
+  <button role="tab" data-tab="images">Published images<span class="count" id="images-count">…</span></button>
+  <button role="tab" data-tab="repos">Repositories</button>
+  <button role="tab" data-tab="backup">Key backup</button>
+</nav>
+
+<section class="panel" id="tab-overview">
 <h2>Publisher name</h2>
 <div class="grid">
-  <div class="card">
+  <div class="card wide">
     <h3>Key</h3>
     <dl>
       <dt>Key</dt><dd><code id="key-name">…</code></dd>
-      <dt>IPNS name</dt><dd><code id="key-id">…</code></dd>
-      <dt>Pull as</dt><dd><code id="pull-as">…</code></dd>
+      <dt>IPNS name</dt><dd><div class="copyrow"><code id="key-id">…</code><button class="copy" data-copy="key-id">Copy</button></div></dd>
+      <dt>Pull as</dt><dd><div class="copyrow"><code id="pull-as">…</code></div></dd>
     </dl>
-    <p class="muted">Every image is published under this one name. Back the key up (below): it exists only on this server.</p>
+    <p class="muted">Every image is published under this one name. Back the key up (Key backup tab): it exists only on this server.</p>
   </div>
-  <div class="card">
+  <div class="card wide">
     <h3>Your domain or ENS name</h3>
     <p class="muted">Point a name you own at the IPNS name, then enter it here. Once it checks out, pull lines use it.</p>
     <form class="row" id="name-form">
-      <input type="text" id="name" placeholder="example.eth or example.com" size="26" autocomplete="off">
+      <input type="text" id="name" placeholder="example.eth or example.com" size="30" autocomplete="off">
       <input type="submit" value="Save and check">
     </form>
     <p id="name-check" class="muted"></p>
     <details><summary class="muted">How to point it here</summary>
-      <p><b>ENS:</b> in the ENS manager, Records → Content hash = <code>ipns://<span class="kid">k51…</span></code>.</p>
-      <p><b>DNS:</b> a TXT record <code>_dnslink.example.com</code> = <code>dnslink=/ipns/<span class="kid">k51…</span></code>.</p>
+      <p><b>ENS:</b> in the ENS manager, Records → Content hash =</p>
+      <div class="copyrow"><code id="ens-value">ipns://k51…</code><button class="copy" data-copy="ens-value">Copy</button></div>
+      <p><b>DNS:</b> a TXT record <code>_dnslink.example.com</code> =</p>
+      <div class="copyrow"><code id="dns-value">dnslink=/ipns/k51…</code><button class="copy" data-copy="dns-value">Copy</button></div>
     </details>
   </div>
 </div>
 
-<h2>Health <button id="refresh">Check again</button></h2>
+<h2>Health <button id="refresh">Check again</button> <span id="refresh-state" class="muted"></span></h2>
 <div class="grid">
   <div class="card">
     <h3>IPNS record</h3>
@@ -107,26 +138,49 @@
       record stays valid if this node goes offline; TTL is how long resolvers cache it.</p>
   </div>
   <div class="card">
-    <h3>Node</h3>
-    <dl id="node"></dl>
-    <div class="actions" style="margin-top:8px"><button id="peers">What the network sees</button></div>
-    <div id="peers-out" class="muted"></div>
-  </div>
-  <div class="card">
     <h3>Storage</h3>
     <div id="storage"></div>
     <p class="muted">Published images are pinned and never collected. Unpublishing an image frees the blocks no other image uses.</p>
   </div>
+  <div class="card wide">
+    <h3>Node</h3>
+    <dl id="node"></dl>
+    <h3 style="margin-top:14px">Listening on</h3>
+    <ul class="addrs" id="addrs"></ul>
+    <div class="actions" style="margin-top:10px"><button id="peers">What the network sees</button></div>
+    <div id="peers-out" class="muted"></div>
+  </div>
+</div>
+</section>
+
+<section class="panel" id="tab-images" hidden>
+<h2>Published images</h2>
+<p class="muted">Every tag can be pulled three ways: by <b>IPFS</b> CID (this exact image, forever), by <b>IPNS</b> name (follows the tag),
+  and by your ENS or DNS name once it checks out (Overview).</p>
+<div id="images" class="muted">Loading…</div>
+</section>
+
+<section class="panel" id="tab-repos" hidden>
+<h2>Root organisation</h2>
+<div class="card">
+  <p class="muted">The public repositories of this Gitea organisation are also published at the root of the forge's
+    name: <code>metadec/app</code> → <code>…/ipns/&lt;name&gt;/app</code>. Its members (Gitea teams) are the ones who
+    can publish there. Leave empty for none.</p>
+  <form class="row" id="org-form">
+    <input type="text" id="org" placeholder="organisation" size="24" autocomplete="off">
+    <input type="submit" value="Save">
+  </form>
+  <p id="org-state" class="muted"></p>
 </div>
 
-<h2>Published images</h2>
-<div id="images" class="muted">Loading…</div>
-
 <h2>Which repositories may publish</h2>
-<p class="muted">A build can push any image name to the staging registry; IPCR only publishes the names of the public
-  Gitea repositories switched on here (<code>&lt;owner&gt;/&lt;repo&gt;</code>). New public repositories are on.</p>
+<p class="muted">Each public repository switched on here publishes under its own name only: the forge sets an
+  <code>IPCR_PUSH_TOKEN</code> secret on it, and the staging registry accepts that token for that name and no other.
+  Workflows log in with it (see the forge page's template). New public repositories are on.</p>
 <div id="repos" class="muted">Loading…</div>
+</section>
 
+<section class="panel" id="tab-backup" hidden>
 <h2>Key backup</h2>
 <div class="grid">
   <div class="card">
@@ -153,6 +207,7 @@
       name's last published images are adopted.</p>
   </div>
 </div>
+</section>
 </main>
 <div id="toast"></div>
 
@@ -213,6 +268,34 @@
       .then(function () { location.href = "/"; });
   };
 
+  // ---- tabs (the open one is kept in the URL, so a reload stays on it)
+  var tabs = document.querySelectorAll(".tabs button");
+  function showTab(name) {
+    if (!$("tab-" + name)) name = "overview";
+    Array.prototype.forEach.call(tabs, function (b) {
+      var on = b.getAttribute("data-tab") === name;
+      b.setAttribute("aria-selected", on ? "true" : "false");
+      $("tab-" + b.getAttribute("data-tab")).hidden = !on;
+    });
+  }
+  Array.prototype.forEach.call(tabs, function (b) {
+    b.onclick = function () { history.replaceState(null, "", "#" + b.getAttribute("data-tab")); showTab(b.getAttribute("data-tab")); };
+  });
+  showTab(location.hash.slice(1));
+
+  // ---- copy
+  function copy(text, btn) {
+    var done = function () { if (btn) { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1500); } };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { window.prompt("Copy:", text); });
+    else window.prompt("Copy:", text);
+  }
+  function copyButton(text) { var b = el("button", "Copy", "copy"); b.type = "button"; b.onclick = function () { copy(text, b); }; return b; }
+  Array.prototype.forEach.call(document.querySelectorAll("button[data-copy]"), function (b) {
+    b.type = "button";
+    b.onclick = function () { copy($(b.getAttribute("data-copy")).textContent, b); };
+  });
+  function spinner(text) { var s = el("span"); s.appendChild(el("span", null, "spin")); s.appendChild(document.createTextNode(text)); return s; }
+
   // ---- status
   function recordView(r, err, tree) {
     if (!r) return badge(err || "none", "bad");
@@ -222,20 +305,28 @@
     if (tree && r.value !== tree) { s.appendChild(document.createTextNode(" · ")); s.appendChild(badge("older tree", "warn")); }
     return s;
   }
+  function showName(n) {
+    var nc = $("name-check"); nc.textContent = "";
+    if (n && n.name) {
+      nc.appendChild(n.ok ? badge("✓ " + n.name + " points at this forge", "ok") : badge("✗ " + (n.error || "does not resolve"), "bad"));
+      if (!n.ok && n.resolves) nc.appendChild(el("div", n.name + " currently resolves to " + n.resolves, "muted"));
+      if (n.checkedAt) nc.appendChild(el("div", "Checked " + n.checkedAt.replace("T", " ").replace("Z", " UTC"), "muted"));
+    } else nc.textContent = "No name set: pull lines use the IPNS name.";
+  }
   function loadStatus(refresh) {
+    var st8 = $("refresh-state");
+    st8.textContent = ""; st8.appendChild(spinner(refresh ? "Checking the network…" : "Loading…"));
     return api("GET", "ipcr/status" + (refresh ? "?refresh=1" : "")).then(function (s) {
+      st8.textContent = "";
       publisher = s.key.id || "";
       $("key-name").textContent = s.key.name || "—";
-      $("key-id").textContent = publisher || "not created yet (first import creates it)";
-      Array.prototype.forEach.call(document.querySelectorAll(".kid"), function (e) { e.textContent = publisher || "k51…"; });
+      $("key-id").textContent = publisher || "not created yet (the first import creates it)";
+      $("ens-value").textContent = "ipns://" + (publisher || "k51…");
+      $("dns-value").textContent = "dnslink=/ipns/" + (publisher || "k51…");
       pubName = s.name && s.name.ok ? s.name.name : "";
-      $("pull-as").textContent = "ipcr.localhost:4767/ipns/" + (pubName || publisher || "…") + "/<owner>/<repo>:<tag>";
-      if (s.name && s.name.name) $("name").value = s.name.name;
-      var nc = $("name-check"); nc.textContent = "";
-      if (s.name && s.name.name) {
-        nc.appendChild(s.name.ok ? badge("✓ " + s.name.name + " → this forge", "ok") : badge("✗ " + (s.name.error || "does not resolve"), "bad"));
-        if (!s.name.ok && s.name.resolves) nc.appendChild(el("div", "resolves to " + s.name.resolves, "muted"));
-      } else nc.textContent = "No name set: pull lines use the IPNS name.";
+      $("pull-as").textContent = "docker pull ipcr.localhost:4767/ipns/" + (pubName || publisher || "…") + "/<owner>/<repo>:<tag>";
+      if (s.name && s.name.name && document.activeElement !== $("name")) $("name").value = s.name.name;
+      showName(s.name);
       var rec = s.record;
       dl($("record"), [
         ["Here", recordView(rec.local, rec.localError, rec.tree)],
@@ -243,64 +334,101 @@
         ["Lifetime", rec.lifetime], ["TTL", rec.ttl],
         ["Checked", s.checkedAt.replace("T", " ").replace("Z", " UTC")]
       ]);
-      dl($("node"), [["Peer ID", s.node.id], ["Connected peers", s.node.peers],
-        ["Listening", (s.node.addresses || []).filter(function (a) { return a.indexOf("/127.") < 0 && a.indexOf("/::1/") < 0; }).slice(0, 4).join("\n")]]);
-      var st = s.storage, pct = st.storageMax ? Math.min(100, 100 * st.repoSize / st.storageMax) : 0;
-      $("storage").innerHTML = "";
-      $("storage").appendChild(el("div", size(st.repoSize) + " of " + size(st.storageMax) + " · " + st.pins + " pins"));
+      var pid = el("div", null, "copyrow"); pid.appendChild(el("code", s.node.id)); pid.appendChild(copyButton(s.node.id));
+      dl($("node"), [["Peer ID", pid], ["Connected peers", s.node.peers]]);
+      // Public addresses first; loopback and the container's own network are of no use to anyone else.
+      var addrs = (s.node.addresses || []).filter(function (a) { return !/^\/ip4\/(127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)|^\/ip6\/(::1|f[cd])/.test(a); });
+      var ul = $("addrs"); ul.textContent = "";
+      if (!addrs.length) ul.appendChild(el("li", "no public address", "warn"));
+      addrs.forEach(function (a) { var li = el("li"); li.appendChild(el("code", a.replace(/\/p2p\/[^/]+$/, ""), "line")); ul.appendChild(li); });
+      var sto = s.storage, pct = sto.storageMax ? Math.min(100, 100 * sto.repoSize / sto.storageMax) : 0;
+      $("storage").textContent = "";
+      $("storage").appendChild(el("div", size(sto.repoSize) + " of " + size(sto.storageMax) + " · " + sto.pins + " pins"));
       var bar = el("div", null, "bar"), fill = el("span"); fill.style.width = pct.toFixed(1) + "%"; bar.appendChild(fill);
       $("storage").appendChild(bar);
-    }).catch(function (e) { toast("Status: " + e.message, 8000); });
+    }).catch(function (e) { st8.textContent = ""; toast("Status: " + e.message, 8000); });
   }
   $("refresh").onclick = function () { busy(this, loadStatus(true)); };
   $("republish").onclick = function () {
     busy(this, api("POST", "ipcr/republish")).then(function () { toast("Published again"); loadStatus(true); });
   };
   $("peers").onclick = function () {
+    var o = $("peers-out"); o.textContent = ""; o.appendChild(spinner("Asking the network…"));
     busy(this, api("GET", "ipcr/peers")).then(function (p) {
-      var o = $("peers-out"); o.textContent = "";
+      o.textContent = "";
       if (p.error) o.appendChild(badge(p.error, "bad"));
       else if (!p.network || !p.network.length) o.appendChild(badge("The network does not know this node's addresses yet: check that port 4768 (TCP and UDP) is reachable.", "warn"));
-      else { o.appendChild(badge("Reachable via:", "ok")); o.appendChild(el("pre", p.network.join("\n"))); }
-    });
+      else {
+        o.appendChild(badge("✓ Other nodes can reach this one via:", "ok"));
+        var ul = el("ul", null, "addrs");
+        p.network.forEach(function (a) { var li = el("li"); li.appendChild(el("code", a, "line")); ul.appendChild(li); });
+        o.appendChild(ul);
+      }
+    }, function () { o.textContent = ""; });
   };
   $("name-form").onsubmit = function (e) {
     e.preventDefault();
-    var btn = this.querySelector("input[type=submit]");
-    busy(btn, api("PATCH", "ipcr/config", { name: $("name").value })).then(function () { return loadStatus(true); });
+    var btn = this.querySelector("input[type=submit]"), input = $("name"), name = input.value.trim();
+    var nc = $("name-check");
+    nc.textContent = "";
+    nc.appendChild(spinner(name ? "Saving, then resolving " + name + " (up to a minute)…" : "Clearing the name…"));
+    btn.disabled = input.disabled = true; btn.value = "Checking…";
+    api("PATCH", "ipcr/config", { name: name })
+      .then(function () { return loadStatus(true); })
+      .then(function () {
+        toast(name ? (pubName ? name + " checks out: pull lines use it" : "Saved: " + name + " does not point here yet") : "Name cleared");
+        loadImages();
+      }, function (err) { showName(null); toast(err.message, 8000); })
+      .then(function () { btn.disabled = input.disabled = false; btn.value = "Save and check"; });
   };
 
   // ---- images
+  // The pull commands for one tag: by CID, by IPNS name, by the configured name when it checks out.
+  // The root organisation's repositories have a short path too: it comes first.
+  function pullCommands(reg, d, img, tg) {
+    var short = img.aliases && img.aliases.length ? img.aliases[0] : "";
+    var path = (short || img.repo) + ":" + tg.tag, rows = [["IPFS", reg + "/ipfs/" + tg.cid]];
+    if (d.publisher) rows.push(["IPNS", reg + "/ipns/" + d.publisher + "/" + path]);
+    if (d.name) rows.push([/\.eth$/.test(d.name) ? "ENS" : "DNS", reg + "/ipns/" + d.name + "/" + path]);
+    if (short && (d.name || d.publisher)) rows.push(["Also", reg + "/ipns/" + (d.name || d.publisher) + "/" + img.repo + ":" + tg.tag]);
+    var box = el("div");
+    rows.forEach(function (r) {
+      var cmd = "docker pull " + r[1], row = el("div", null, "cmd");
+      row.appendChild(el("span", r[0], "k")); row.appendChild(el("code", cmd)); row.appendChild(copyButton(cmd));
+      box.appendChild(row);
+    });
+    return box;
+  }
   function loadImages() {
     return api("GET", "ipcr/images").then(function (d) {
       var box = $("images"); box.textContent = ""; box.className = "";
+      var reg = d.registry || "ipcr.localhost:4767", n = 0;
       if (d.stagingError) box.appendChild(el("p", "Staging registry: " + d.stagingError, "warn"));
-      if (!d.images || !d.images.length) { box.appendChild(el("p", "Nothing published yet.", "muted")); return; }
+      if (!d.images || !d.images.length) { box.appendChild(el("p", "Nothing published yet.", "muted")); $("images-count").textContent = "0"; return; }
       d.images.forEach(function (img) {
-        var h = el("h3", img.repo + " ");
+        n += img.tags.length;
+        var card = el("div", null, "card"); card.style.marginBottom = "12px";
+        var h = el("h3", (img.aliases && img.aliases.length ? img.aliases[0] + "  ·  " : "") + img.repo + " ");
         h.appendChild(img.allowed ? badge("publishing", "ok") : badge("not allowed: new tags are not published", "warn"));
-        box.appendChild(h);
-        var wrap = el("div", null, "scroll"), t = el("table"), head = el("tr");
-        ["Tag", "Image", "", ""].forEach(function (x) { head.appendChild(el("th", x)); });
-        t.appendChild(head);
+        card.appendChild(h);
         img.tags.forEach(function (tg) {
-          var tr = el("tr");
-          var td1 = el("td"); td1.appendChild(el("code", tg.tag));
-          if (tg.at) td1.appendChild(el("div", tg.at.replace("T", " ").replace("Z", ""), "muted"));
-          var td2 = el("td"); td2.appendChild(el("code", "/ipfs/" + tg.cid));
-          var td3 = el("td"), prov = el("span", "", "muted"); td3.appendChild(prov);
-          var td4 = el("td"), acts = el("div", null, "actions");
+          var t = el("div", null, "tag"), head = el("div", null, "taghead"), left = el("div");
+          left.appendChild(el("code", tg.tag));
+          if (tg.at) left.appendChild(el("span", "  " + tg.at.replace("T", " ").replace("Z", " UTC"), "muted"));
+          var prov = el("span", "", "muted"); prov.style.marginLeft = "10px"; left.appendChild(prov);
+          var acts = el("div", null, "actions");
           var chk = el("button", "Findable?");
           chk.onclick = function () {
+            prov.textContent = ""; prov.appendChild(spinner("asking the network…"));
             busy(chk, api("GET", "ipcr/providers?cid=" + encodeURIComponent(tg.cid))).then(function (p) {
               prov.textContent = "";
-              prov.appendChild(p.self ? badge("✓ this node is listed", "ok") : badge("✗ not listed (" + p.providers + " other providers)", "warn"));
+              prov.appendChild(p.self ? badge("✓ findable: this node is listed", "ok") : badge("✗ not listed yet (" + p.providers + " other providers)", "warn"));
               if (!p.self) {
                 var ann = el("button", "Announce");
                 ann.onclick = function () { busy(ann, api("POST", "ipcr/announce", { cid: tg.cid })).then(function () { toast("Queued: Kubo announces it within a minute or two; check again then.", 6000); }); };
                 prov.appendChild(document.createTextNode(" ")); prov.appendChild(ann);
               }
-            });
+            }, function () { prov.textContent = ""; });
           };
           acts.appendChild(chk);
           if (tg.tag !== "latest") {
@@ -318,48 +446,83 @@
             });
           };
           acts.appendChild(un);
-          td4.appendChild(acts);
-          [td1, td2, td3, td4].forEach(function (x) { tr.appendChild(x); });
-          t.appendChild(tr);
+          head.appendChild(left); head.appendChild(acts);
+          t.appendChild(head);
+          t.appendChild(pullCommands(reg, d, img, tg));
+          card.appendChild(t);
         });
-        (img.staging || []).filter(function (s) { return s.state !== "published"; }).forEach(function (s) {
-          var tr = el("tr");
-          var td1 = el("td"); td1.appendChild(el("code", s.tag));
-          var td2 = el("td", s.state === "unpublished" ? "unpublished; still in staging" : (img.allowed ? "in staging, not imported yet" : "in staging, not allowed"), "muted");
-          var td3 = el("td"), td4 = el("td");
-          if (img.allowed) {
-            var re = el("button", s.state === "unpublished" ? "Publish again" : "Import now");
-            re.onclick = function () { busy(re, api("POST", "ipcr/reimport", { repo: img.repo, tag: s.tag })).then(function () { toast("Queued"); setTimeout(loadImages, 5000); }); };
-            td4.appendChild(re);
-          }
-          [td1, td2, td3, td4].forEach(function (x) { tr.appendChild(x); });
-          t.appendChild(tr);
-        });
-        wrap.appendChild(t); box.appendChild(wrap);
+        var pending = (img.staging || []).filter(function (s) { return s.state !== "published"; });
+        if (pending.length) {
+          card.appendChild(el("h3", "In staging, not published"));
+          var tbl = el("table");
+          pending.forEach(function (s) {
+            var tr = el("tr"), td1 = el("td"), td2 = el("td", s.state === "unpublished" ? "unpublished; still in staging" : (img.allowed ? "not imported yet" : "repository not allowed"), "muted"), td3 = el("td");
+            td1.appendChild(el("code", s.tag));
+            if (img.allowed) {
+              var re = el("button", s.state === "unpublished" ? "Publish again" : "Import now");
+              re.onclick = function () { busy(re, api("POST", "ipcr/reimport", { repo: img.repo, tag: s.tag })).then(function () { toast("Queued: imported on the next pass"); setTimeout(loadImages, 5000); }); };
+              td3.appendChild(re);
+            }
+            tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tbl.appendChild(tr);
+          });
+          card.appendChild(tbl);
+        }
+        box.appendChild(card);
       });
+      $("images-count").textContent = String(n);
     }).catch(function (e) { $("images").textContent = "Images: " + e.message; });
   }
 
   // ---- repositories
+  function loadSettings() {
+    return api("GET", "settings").then(function (st) {
+      if (document.activeElement !== $("org")) $("org").value = st.rootOrg || "";
+      $("org-state").textContent = st.rootOrg ? "Publishing " + st.rootOrg + "'s repositories at the root." : "No root organisation.";
+    }).catch(function (e) { $("org-state").textContent = e.message; });
+  }
+  $("org-form").onsubmit = function (e) {
+    e.preventDefault();
+    var btn = this.querySelector("input[type=submit]"), st = $("org-state");
+    st.textContent = ""; st.appendChild(spinner("Saving, then updating credentials and IPCR's list…"));
+    btn.disabled = true;
+    api("PUT", "settings", { rootOrg: $("org").value.trim() })
+      .then(function (r) { toast(r.rootOrg ? r.rootOrg + " is the root organisation; short paths appear on IPCR's next pass" : "No root organisation"); return Promise.all([loadSettings(), loadRepos()]); },
+            function (err) { toast(err.message, 8000); return loadSettings(); })
+      .then(function () { btn.disabled = false; setTimeout(loadImages, 70000); });
+  };
   function loadRepos() {
     return api("GET", "repos").then(function (repos) {
       var box = $("repos"); box.textContent = ""; box.className = "";
       if (!repos.length) { box.appendChild(el("p", "No public repository yet.", "muted")); return; }
       var t = el("table"), head = el("tr");
-      ["Repository", "Publish images"].forEach(function (x) { head.appendChild(el("th", x)); });
+      ["Repository", "Published as", "Push credential", "Publish"].forEach(function (x) { head.appendChild(el("th", x)); });
       t.appendChild(head);
       repos.forEach(function (r) {
-        var tr = el("tr"), td1 = el("td"), td2 = el("td"), cb = document.createElement("input");
+        var tr = el("tr"), td1 = el("td"), td2 = el("td"), td3 = el("td"), td4 = el("td"), cb = document.createElement("input");
         td1.appendChild(el("code", r.full_name));
+        (r.published_as || []).forEach(function (p, i) { var d = el("div"); d.appendChild(el("code", p + ":<tag>", i ? "muted" : "")); td2.appendChild(d); });
+        if (!r.publish) td2.appendChild(el("span", "—", "muted"));
+        if (r.collision) td2.appendChild(el("div", "no short path: " + r.collision, "warn"));
+        if (r.publish) {
+          td3.appendChild(r.credential ? badge("✓ IPCR_PUSH_TOKEN set", "ok") : badge("✗ missing", "bad"));
+          var rot = el("button", "Reissue"); rot.style.marginLeft = "8px";
+          rot.onclick = function () {
+            if (!confirm("Give " + r.full_name + " a new IPCR_PUSH_TOKEN? The old one stops working at once; running builds may fail.")) return;
+            busy(rot, api("POST", "repos/rotate", { full_name: r.full_name })).then(function () { toast("New token set on " + r.full_name); loadRepos(); });
+          };
+          td3.appendChild(rot);
+        } else td3.appendChild(el("span", "—", "muted"));
         cb.type = "checkbox"; cb.checked = r.publish;
         cb.onchange = function () {
           cb.disabled = true;
           api("PUT", "repos", { full_name: r.full_name, publish: cb.checked })
-            .then(function () { cb.disabled = false; toast(r.full_name + (cb.checked ? ": publishing" : ": not publishing")); loadImages(); },
-                  function (e) { cb.disabled = false; cb.checked = !cb.checked; toast(e.message, 8000); });
+            .then(function () { toast(r.full_name + (cb.checked ? ": publishing" : ": not publishing")); return loadRepos(); },
+                  function (e) { cb.checked = !cb.checked; toast(e.message, 8000); })
+            .then(function () { cb.disabled = false; loadImages(); });
         };
-        td2.appendChild(cb);
-        tr.appendChild(td1); tr.appendChild(td2); t.appendChild(tr);
+        td4.appendChild(cb);
+        [td1, td2, td3, td4].forEach(function (x) { tr.appendChild(x); });
+        t.appendChild(tr);
       });
       var wrap = el("div", null, "scroll"); wrap.appendChild(t); box.appendChild(wrap);
     }).catch(function (e) { $("repos").textContent = "Repositories: " + e.message; });
@@ -404,7 +567,7 @@
     }).catch(function (e) { toast(e.message, 8000); });
   };
 
-  loadStatus(false); loadImages(); loadRepos();
+  loadStatus(false); loadImages(); loadRepos(); loadSettings();
 })();
 </script>
 </body>

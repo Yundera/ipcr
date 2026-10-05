@@ -40,6 +40,14 @@ with. See docs/forge.md.
 10. **The bridge mounts Kubo's keystore read-only**, so it can export the publisher key, encrypted.
 11. **An admin API in `ipcr-gateway`** (`:4769`) on a new internal network, `ipcr-admin`. Its Bearer
     token is in `ipcr/state/admin-token`, mode 0644.
+12. **A staging gate** (`forge-gate`), running in the CI daemon's network namespace. The registry
+    behind it has no network and listens on a unix socket.
+13. **A second Gitea token for the bridge,** with `write:repository` and `read:user`. It sets each
+    publishing repository's `IPCR_PUSH_TOKEN` Actions secret and checks name collisions.
+14. **A credential IPCR generates for itself** (`ipcr/state/staging-auth`, mode 0644), read by the
+    bridge.
+15. **The root organisation** (`IPCR_ROOT_ORG`): setup creates it if missing, and its repositories
+    are also published at the root of the forge's name.
 
 ## Why it is necessary
 
@@ -103,6 +111,27 @@ needed because CI jobs on `ci-internal` can reach `ipcr-gateway`. The file is wo
 because ipcrd, root without `CAP_CHOWN`, cannot hand a file to `$PUID` any other way. It sits in
 the app's own state folder.
 
+**12. The gate.** Before it, any CI job could push any image name to the staging registry, and IPCR
+published what it found. With a short organisation address (`metadec.eth/app`), that would let
+anyone with write access to any repository publish under the organisation's name. The gate makes
+each repository's credential good for its own name only. It is a proxy rather than a registry
+token server: Docker, BuildKit and ipcrd all answer a Basic challenge, so no JWT signing or second
+realm is needed. The registry moves to a unix socket so the gate cannot be bypassed: the jobs'
+daemon sees neither the socket's folder nor a port.
+
+**13. The secrets token.** Gitea Actions secrets are the one credential Gitea gives a repository's
+own workflows and withholds from forks. The job's automatic `GITEA_TOKEN` cannot prove which
+repository it belongs to. Setting a secret takes `write:repository`. The token is not
+`public-only`, so collision checks also see private users and organisations.
+
+**14. IPCR's own credential.** Same handoff as the admin token: ipcrd (root without capabilities)
+cannot write into another uid's folder, so it writes into its own state folder, which the bridge
+already mounts read-only.
+
+**15. The root organisation.** Short names (`metadec.eth/ipcr-hello`) need one owner whose
+repositories may use them. A Gitea organisation makes "who may publish there" a matter of team
+membership, managed in Gitea.
+
 ## Security mitigations in place
 
 **The bridge**
@@ -136,6 +165,22 @@ the app's own state folder.
 - **Who can publish is stated** in the tips and on the page. Write access to any repository means
   being able to publish images under the forge's name. Images from private repositories become
   public on IPFS.
+
+**The staging gate**
+- **Least privilege per credential.**
+  - A repository's credential reads and writes only `/v2/<owner>/<repo>/{blobs,manifests,tags}/`:
+    no catalog, no delete, no other name.
+  - Cross-repository blob mounts are stripped.
+  - The importer can read, list and delete, but not push.
+  - Paths with `..`, `//` or encoded segments are refused.
+- **The gate holds no secrets.** It stores SHA-256 hashes of random 32-byte tokens and compares
+  them in constant time. The tokens themselves exist only in Gitea's secret store and in the jobs
+  that use them.
+- **The registry cannot be reached directly.** It runs with `network_mode: none`, and its socket
+  folder (0700, `$PUID`) is mounted only into the gate.
+- **Credentials follow the list.** A repository switched off or frozen loses its gate credential
+  and its secret at once. "Reissue" rotates a token.
+- **Gate container:** `$PUID`, no capabilities, read-only root filesystem, 64 MB.
 
 **The page**
 - **The public page cannot change anything.** The bridge serves it read-only: the embedded page,
@@ -180,10 +225,14 @@ the app's own state folder.
   namespace only.
 - **Radicle signatures are the forge's, not the developer's.** The node is each repository's only
   delegate.
-- **Image names are limited, but their source is not proven.** Only allowed names (public
-  repositories that are switched on) are published. A build in any repository can still push an
-  allowed name to the staging registry. Per-repository credentials, issued by the bridge, are a
-  planned follow-up.
+- **The gate is not a sandbox.** Jobs run on a privileged Docker-in-Docker daemon (deviation 1).
+  Anyone who can run a workflow can break out of it to the host, and from there do anything,
+  including publish under any name. The gate removes the ordinary path, a plain `docker push` of
+  someone else's name. It cannot contain a hostile CI user. Real isolation needs a VM-based runner.
+- **Repository writers can read the push token,** since a workflow can print it. Reissue it when a
+  repository changes hands.
+- **Existing workflows must add a login step,** or their pushes fail with 401.
+- **Private repositories cannot publish:** they get no push credential.
 - **The bridge can read the publisher key.** A compromise of the public-facing bridge leaks it. That
   is the trust it already has with the Radicle node key.
 - **The admin token is world-readable** inside the app's state folder on the host.
@@ -200,8 +249,8 @@ Everything lives under `/DATA/AppData/ipcr-forge/`, one folder per part:
 | --- | --- |
 | `gitea/` | repositories, the database (SQLite), configuration, the runner's registration and config |
 | `radicle/` | node identity (key pair), seeded repositories, Caddy config |
-| `bridge/` | `state/`: the Gitea → Radicle mapping, one bare mirror per repository (disposable), the admin session key and the repository toggles (`admin.json`); `secrets/` (0700): its Gitea token, the webhook secret, the OAuth2 client credentials |
-| `ci/` | the daemon's socket, its image store (`docker/`), the staging registry (`registry/`, disposable) |
+| `bridge/` | `state/`: the Gitea → Radicle mapping, one bare mirror per repository (disposable), the admin session key and the repository toggles (`admin.json`); `gate/credentials.json` (token hashes); `secrets/` (0700): its two Gitea tokens, the webhook secret, the OAuth2 client credentials |
+| `ci/` | the daemon's socket, its image store (`docker/`), the staging registry (`registry/`, disposable) and its socket (`registry-socket/`) |
 | `ipcr/` | Kubo repo (node identity, IPNS keys, pinned images), TLS CA, watcher state, `config.json` (name, allowlist), the admin token |
 
 No user directory (`/DATA/Documents`, `Media`, …) is mounted. The one file outside `/DATA` is

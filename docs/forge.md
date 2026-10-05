@@ -100,13 +100,20 @@ code checks visibility again anyway.
   the bridge keeps (`IMPORT_ALLOW_REQUIRED`). That list holds the public Gitea repositories, minus
   those switched off in the admin pages. Images built from private repositories are therefore not
   published.
-- **What the allowlist does not cover:** a job can still push any name to the unauthenticated
-  `localhost:5000`. So anyone who can push code here can publish under an allowed name.
-  Registration is off, so every user was created by the admin.
+- **Each repository publishes its own name only.** The staging registry sits behind a gate (see
+  [Staging gate](#staging-gate-and-push-credentials)). A job logs in with its repository's
+  `IPCR_PUSH_TOKEN`, and may push `<owner>/<repo>` and nothing else. Gitea does not give secrets to
+  workflows from forks, so a fork's pull request cannot publish.
+- **The root organisation's short names belong to its members.** Gitea teams decide who can push
+  to `metadec/*`, so who can publish `metadec.eth/<repo>`.
+- **Not a sandbox.** Jobs run on a privileged Docker-in-Docker daemon. Anyone who can run a
+  workflow here can break out of it to the host, and from there to everything, including the
+  gate. The gate stops the ordinary way to publish someone else's name; it does not contain a
+  hostile CI user. Registration is off, so every user was created by the admin.
 - **Fork pull requests** from users without write access wait for "Approve and run" in Gitea 1.27.
 - The page, the tips and `rationale.md` say all of this plainly.
-- **Follow-up:** per-repository push credentials, with the bridge acting as a registry token
-  server, would tie each image name to the one repository allowed to build it.
+- **Who can read a push token:** anyone with write access to its repository (a workflow can print
+  it). Reissue it in the admin pages when a repository changes hands.
 
 ## Admin
 
@@ -146,13 +153,68 @@ Then publish with a sequence number above the network's.
 The bridge seals (it can read the keystore) and ipcrd opens, so the cleartext key never crosses the
 network.
 
+## Root organisation (short names)
+
+The public repositories of one Gitea organisation are also published at the root of the forge's
+name. The organisation is `metadec` on our boxes (`IPCR_ROOT_ORG`, then the admin page's
+Repositories tab). So `metadec/ipcr-hello` pulls as any of:
+```
+ipcr.localhost:4767/ipns/metadec.eth/ipcr-hello:1.0.0
+ipcr.localhost:4767/ipns/metadec.eth/metadec/ipcr-hello:1.0.0
+ipcr.localhost:4767/ipns/k51…/ipcr-hello:1.0.0
+```
+- **How it is passed on:** the bridge sends IPCR `allow.aliases` (`{"metadec/ipcr-hello":
+  ["ipcr-hello"]}`). IPCR publishes each tag under the full path and every alias in one tree
+  update.
+- **Alias sync:** on each pass IPCR adds and removes alias folders to match. Switching the
+  organisation off or changing it moves the short paths within a minute.
+- **Collisions:** a short path is one folder at the root of the tree, so it is skipped (and the
+  Repositories tab says why) when its name is:
+  - a Gitea user or organisation, whose repositories would share that folder;
+  - the owner of another allowed repository.
+
+  IPCR checks the owner case again on its side.
+- **Setup:** creates the organisation (public, owned by `gitea_admin`) if it is missing, and puts
+  the example repository in it.
+
+## Staging gate and push credentials
+
+```
+job ── docker login localhost:5000 (owner/repo + IPCR_PUSH_TOKEN) ──▶ forge-gate :5000 (in the CI
+IPCR ── Basic ipcr:<generated> ── forge-docker:5000 ───────────────▶   daemon's network namespace)
+                                                                        │ unix socket
+                                                                        ▼
+                                                                     forge-registry (no network)
+```
+- **`forge-gate`** is `ipcr-forge-bridge gate`, built from the same image.
+  - It checks Basic auth against `bridge/state/gate/credentials.json` (hashes only), re-read when
+    it changes.
+  - **A repository** may GET, HEAD, POST, PUT and PATCH under `/v2/<owner>/<repo>/{blobs,manifests,tags}/`.
+    Cross-repository blob mounts are stripped, so the client uploads instead.
+  - **The importer** may read everything, list the catalog and delete manifests.
+  - Anything else gets 401 or 403.
+- **`forge-registry`** listens on a unix socket in a folder only it and the gate mount. Jobs run in
+  the daemon, which sees neither that folder nor a port. So the gate cannot be bypassed short of a
+  breakout (see Trust).
+- **Credentials:**
+  - **Per repository:** the bridge generates a token for each repository that may publish. It
+    sets the repository's `IPCR_PUSH_TOKEN` Actions secret through a `write:repository` token
+    (`ipcr-forge-secrets`, minted at setup) and writes the token's hash for the gate. A
+    repository switched off or frozen loses both. "Reissue" in the admin page rotates the token.
+  - **IPCR:** IPCR generates its own credential at its first start (`IMPORT_AUTH_GENERATE`,
+    `state/staging-auth`), and the bridge passes its hash to the gate.
+- **Migration:** existing workflows must add the login step (the template below). Without it, a
+  push fails with `401 Unauthorized` at its first blob check.
+
 ## Workflow contract
 
 A repository opts in by committing a workflow under `.gitea/workflows/`. The template is
 [bridge/example/.gitea/workflows/build.yml](../bridge/example/.gitea/workflows/build.yml):
 
-- `images: localhost:5000/${{ github.repository }}`: the staging registry. No login, no secret.
-  `docker/metadata-action` lowercases the name.
+- `docker/login-action` to `localhost:5000`, `username: ${{ github.repository }}`,
+  `password: ${{ secrets.IPCR_PUSH_TOKEN }}`.
+- `images: localhost:5000/${{ github.repository }}`: the repository's own name at the staging
+  registry, the only one its token may push. `docker/metadata-action` lowercases it.
 - `context: .` and `driver-opts: network=host`: see findings 2 and 3.
 - The image is published as `/ipns/<forge>/<owner>/<repo>:<tag>`.
 
@@ -219,6 +281,24 @@ New in v3 (tested locally with Gitea 1.27.3 and rad 1.10.1, 2026-10-04):
 21. **Gitea skips its consent screen only after a first grant,** even with
     `skip_secondary_authorization`. Each admin clicks "Authorize" once.
 
+22. **Radicle IDs are derived from the identity document.** `metadec/ipcr-hello` (the example,
+    created again in the organisation) had the same name, description and delegate as
+    `gitea_admin/ipcr-hello`, so the same RID. `rad init` failed with "attempt to reinitialize". The
+    bridge now puts the Gitea path in the Radicle description, which makes the document unique per
+    forge.
+23. **Gitea regenerates an OAuth2 app's secret on every update.** `setup` used to update the app at
+    every start (to follow the hosts) and kept the old secret, which broke the admin login
+    (`unauthorized_client`). It now updates only when the hosts change, and saves the secret Gitea
+    returns.
+24. **Kubo's resolve cache can lag the node's own publishes.** A tree published again after a change
+    in between kept resolving to the in-between tree for the record's TTL. The generic `resolve` RPC
+    ignores `nocache` (only `name/resolve` honours it). ipcrd now resolves names it publishes,
+    directly or through an ENS/DNSLink name pointing at its key, with `name/resolve --nocache` and
+    then the path under `/ipfs/<tree>`.
+25. **A gate needs no registry token server.** Docker and BuildKit answer a `Basic` challenge from
+    a plain-HTTP `localhost` registry with the credentials from `docker login`, and ipcrd's client
+    already did the same.
+
 ## Verified
 
 **Locally** (Gitea 1.27.3-rootless, `radicle-seed-node` 1.10.1, the bridge image, one Docker network):
@@ -256,14 +336,29 @@ New in v3 (tested locally with Gitea 1.27.3 and rad 1.10.1, 2026-10-04):
 | Restore a throwaway key, then the original | name switches and pulls under each; original back with sequence 7 (network had 5); kept copy reused, no duplicate key |
 | `forge-registry` restart | garbage collection frees the deleted tags' blobs |
 
+**Org root and gate, on holyhorse** (ipcr 1.4.0, bridge 0.3.0, 2026-10-05):
+
+| Check | Result |
+| --- | --- |
+| setup with `IPCR_ROOT_ORG=metadec` | org and `metadec/ipcr-hello` created; `IPCR_PUSH_TOKEN` set on both public repositories; gate knows them and IPCR |
+| tag `v1.0.0` on `metadec/ipcr-hello` (workflow with login) | built, imported, published as `ipcr-hello` and `metadec/ipcr-hello` |
+| `docker pull ipcr.localhost:4767/ipns/metadec.eth/ipcr-hello:1.0.0` | works (`metadec.eth` → this forge's key); also by `k51…/ipcr-hello` and `k51…/metadec/ipcr-hello` |
+| a workflow without login | push refused, 401 |
+| probe job in `gitea_admin/ipcr-hello` | no login 401; own token: catalog 403, `metadec/ipcr-hello` push or read 403, own repository 202; wrong token 401; `/run/staging` from the daemon: empty, no socket |
+| root organisation off / on (twice) | short path gone / back on the next pass, by k51 and by ENS |
+| a user named `ipcr-hello` | short path skipped, reason shown; back when the user is gone |
+| repository switched off | gate credential and Gitea secret removed; restored when switched on |
+
 ## Open items
 
 - **Pull from a second server.** Verified on holyhorse itself only; v2's images pulled across
   servers the same way.
-- **Publish the images**: `ghcr.io/yundera/ipcr:1.3.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.2.0`
-  (workflows `image.yml` and `bridge.yml`, tags `v1.3.0` and `bridge-v0.2.0`).
-- **Image provenance:** the bridge as a registry token server, so only a repository's own CI can
-  push its name (see Trust).
+- **Publish the images**: `ghcr.io/yundera/ipcr:1.4.0` and `ghcr.io/yundera/ipcr-forge-bridge:0.3.0`
+  (workflows `image.yml` and `bridge.yml`, tags `v1.4.0` and `bridge-v0.3.0`).
+- **CI isolation:** jobs on a privileged daemon can reach the host. Rootless DinD does not start
+  on this platform (AppArmor); a VM-based runner would be the real fix.
+- **Private repositories** cannot publish: the bridge only sees public ones. If wanted, give them
+  push credentials too (the images would still be public on IPFS).
 - **Old keys:** `<key>-replaced-*` keys are kept forever, and Kubo keeps republishing them. A
   "delete" in the admin page, once the new key is confirmed.
 - **act_runner** is pinned at 0.6.1, proven with Gitea 1.27.3. Upstream has moved on.

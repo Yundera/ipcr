@@ -131,9 +131,10 @@ git push -u origin main</code></pre>
     Applications</b>).</li>
   <li><b>Add a workflow</b> at <code>.gitea/workflows/build.yml</code>. This one builds the
     <code>Dockerfile</code> at the root for every <code>v*</code> tag. It is a GitHub-style
-    workflow with two differences: the image goes to <code>localhost:5000</code>, this forge's
-    staging registry (no login, no secret), and buildx's builder runs with <code>network=host</code>
-    so it can reach that registry.
+    workflow with three differences: it logs in to <code>localhost:5000</code>, this forge's staging
+    registry, as the repository itself (the forge sets the <code>IPCR_PUSH_TOKEN</code> secret on
+    every public repository allowed to publish), the image goes there under the repository's own
+    name, and buildx's builder runs with <code>network=host</code> so it can reach that registry.
 <pre><code>name: image
 on:
   push:
@@ -143,6 +144,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: localhost:5000
+          username: &#36;{{ github.repository }}
+          password: &#36;{{ secrets.IPCR_PUSH_TOKEN }}
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -163,12 +169,13 @@ jobs:
 <pre><code>git add .gitea && git commit -m "Build the image"
 git tag v1.0.0
 git push origin main v1.0.0</code></pre>
-    The image is published as <code>&lt;owner&gt;/&lt;repo&gt;:1.0.0</code> under this forge's name.</li>
+    The image is published as <code>&lt;owner&gt;/&lt;repo&gt;:1.0.0</code> under this forge's name.
+    Repositories of the forge's own organisation are also published at the root:
+    <code>&lt;repo&gt;:1.0.0</code>.</li>
 </ol>
-<p class="note">Who can publish: anyone who can push to a repository on this forge, since a build
-can push any image name to the staging registry. Images are public once on IPFS, even when they come from
-a private repository. Gitea holds a pull request from a fork until someone with write access approves
-its workflow run: read the workflow before you approve.</p>
+<p class="note">Who can publish: each public repository publishes under its own name only, with its
+own push credential; the short root names belong to the forge's organisation, so to its members.
+Workflows from forks get no secrets, so they cannot publish. Private repositories never publish.</p>
 
 <h2 id="use">Use an image</h2>
 <p>Copy the line from <a href="#images">Published images</a> into a compose file. It works on this
@@ -316,7 +323,9 @@ for IPFS peers. Details: <a href="https://github.com/Yundera/ipcr" target="_blan
         Object.keys(r.tags).sort(cmpTags).forEach(function (tag) {
           var info = r.tags[tag];
           // The configured domain or ENS name, while IPCR's check says it points here.
-          var path = pub.name && pub.publisher && r.ipns.indexOf(pub.publisher) === 0 ? pub.name + r.ipns.slice(pub.publisher.length) : r.ipns;
+          // The short path (root organisation) when there is one, under the name when it checks out.
+          var rest = r.aliases && r.aliases.length ? "/" + r.aliases[0] : r.ipns.slice(pub.publisher ? pub.publisher.length : 0);
+          var path = (pub.name || pub.publisher || r.ipns.split("/")[0]) + rest;
           var line = "image: " + reg + "/ipns/" + path + ":" + tag;
           var tr = el("tr");
           var td1 = el("td"); td1.appendChild(el("code", tag));

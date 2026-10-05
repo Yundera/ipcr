@@ -545,6 +545,7 @@ func (a *admin) handlePeers(w http.ResponseWriter, r *http.Request) {
 type imageView struct {
 	Repo    string       `json:"repo"`
 	IPNS    string       `json:"ipns,omitempty"`
+	Aliases []string     `json:"aliases,omitempty"`
 	Allowed bool         `json:"allowed"`
 	Tags    []tagView    `json:"tags"`
 	Staging []stagingTag `json:"staging,omitempty"`
@@ -581,7 +582,7 @@ func (a *admin) handleImages(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"publisher": wt.pub.Publisher, "name": wt.pub.Name, "registry": wt.pub.Registry}
 	for repo, pr := range wt.pub.Images {
 		v := view(repo)
-		v.IPNS = pr.IPNS
+		v.IPNS, v.Aliases = pr.IPNS, pr.Aliases
 		for tag, t := range pr.Tags {
 			v.Tags = append(v.Tags, tagView{tag, t})
 		}
@@ -661,9 +662,11 @@ func (a *admin) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	}
 	wt.mu.Lock()
 	var t publishedTag
+	var paths []string
 	ok := wt.pub.has(req.Repo, req.Tag)
 	if ok {
 		t = wt.pub.Images[req.Repo].Tags[req.Tag]
+		paths = append([]string{req.Repo}, wt.pub.Images[req.Repo].Aliases...)
 	}
 	wt.mu.Unlock()
 	if !ok {
@@ -673,16 +676,18 @@ func (a *admin) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	base := publisherDir(wt.publisher)
 	_, err = updateTree(ctx, wt.publisher, base, 0, func(base string) error {
-		if err := kuboJSON(ctx, "files/rm", url.Values{"arg": {base + "/" + req.Repo + "/" + req.Tag}, "force": {"true"}}, nil); err != nil {
-			return err
-		}
-		// Remove the directories the tag leaves empty (repo, then its owner…).
-		for dir := base + "/" + req.Repo; dir != base; dir = path.Dir(dir) {
-			var ls struct{ Entries []json.RawMessage }
-			if kuboJSON(ctx, "files/ls", arg(dir), &ls) != nil || len(ls.Entries) > 0 {
-				break
+		for _, p := range paths {
+			if err := kuboJSON(ctx, "files/rm", url.Values{"arg": {base + "/" + p + "/" + req.Tag}, "force": {"true"}}, nil); err != nil {
+				return err
 			}
-			kuboJSON(ctx, "files/rm", url.Values{"arg": {dir}, "recursive": {"true"}}, nil)
+			// Remove the directories the tag leaves empty (repo, then its owner…).
+			for dir := base + "/" + p; dir != base; dir = path.Dir(dir) {
+				var ls struct{ Entries []json.RawMessage }
+				if kuboJSON(ctx, "files/ls", arg(dir), &ls) != nil || len(ls.Entries) > 0 {
+					break
+				}
+				kuboJSON(ctx, "files/rm", url.Values{"arg": {dir}, "recursive": {"true"}}, nil)
+			}
 		}
 		return nil
 	})
@@ -799,20 +804,23 @@ func (a *admin) handleRetag(w http.ResponseWriter, r *http.Request) {
 	}
 	wt.mu.Lock()
 	var src publishedTag
+	var paths []string
 	ok := wt.pub.has(req.Repo, req.From)
 	if ok {
 		src = wt.pub.Images[req.Repo].Tags[req.From]
+		paths = append([]string{req.Repo}, wt.pub.Images[req.Repo].Aliases...)
 	}
 	wt.mu.Unlock()
 	if !ok {
 		fail(w, http.StatusNotFound, fmt.Errorf("%s:%s is not published", req.Repo, req.From))
 		return
 	}
-	name, err := publishImage(r.Context(), wt.publisher, req.Repo, req.Tag, src.CID)
+	name, err := publishPaths(r.Context(), wt.publisher, paths, req.Tag, src.CID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	name += "/" + req.Repo
 	wt.mu.Lock()
 	wt.pub.set(req.Repo, name, req.Tag, publishedTag{CID: src.CID, Digest: src.Digest, At: time.Now().UTC().Format(time.RFC3339)})
 	wt.save()
@@ -851,8 +859,9 @@ func (a *admin) handleConfig(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Name  *string `json:"name"`
 			Allow *struct {
-				Required bool     `json:"required"`
-				Repos    []string `json:"repos"`
+				Required bool                `json:"required"`
+				Repos    []string            `json:"repos"`
+				Aliases  map[string][]string `json:"aliases"`
 			} `json:"allow"`
 		}
 		if err := decode(r, &req); err != nil {
@@ -881,6 +890,20 @@ func (a *admin) handleConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			sort.Strings(cfg.Allow.Repos)
+			// Short paths only for listed repositories, one segment each; collisions are dropped
+			// when publishing (watcher.aliases).
+			cfg.Allow.Aliases = map[string][]string{}
+			for repo, as := range req.Allow.Aliases {
+				repo = strings.ToLower(repo)
+				if !seen[repo] {
+					continue
+				}
+				for _, a := range as {
+					if a = strings.ToLower(a); validAlias(a) {
+						cfg.Allow.Aliases[repo] = append(cfg.Allow.Aliases[repo], a)
+					}
+				}
+			}
 		}
 		writeJSON(filepath.Join(a.stateDir, "config.json"), cfg)
 		if nameChanged {

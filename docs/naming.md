@@ -31,7 +31,12 @@ One IPNS name holds a directory per image, each a tag directory (spec §3):
        └─ 2.3.1  → image root CID
 ```
 
-`ipcr.localhost:4767/ipns/<name>/team/app:2.3.1` resolves `/ipns/<name>/team/app/2.3.1`. Docker
+`ipcr.localhost:4767/ipns/<name>/team/app:2.3.1` resolves `/ipns/<name>/team/app/2.3.1`.
+
+A publisher may also put an image at a shorter path: `allow.aliases` in `config.json` publishes
+`metadec/app` as `/ipns/<name>/app` as well. IPCR Forge uses this for its root organisation's
+repositories, so `metadec.eth/app` names `metadec/app` ([forge.md](forge.md#root-organisation-short-names)).
+An alias is one segment, and it is never the first segment of another image's path. Docker
 accepts multi-segment repository paths, and the reference (tag or digest) never contains a `/`,
 so the split is unambiguous.
 

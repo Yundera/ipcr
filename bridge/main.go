@@ -4,6 +4,7 @@
 //	serve (default)  webhook receiver + mirror worker + the forge's page
 //	setup            install step: Gitea token, system webhook, example repository (idempotent)
 //	health           exit 0 when `serve` answers, for the container healthcheck
+//	gate             the staging registry's front door: per-repository push credentials (gate.go)
 //
 // What gets mirrored: every public, non-fork, non-mirror Gitea repository, as seen by a token
 // scoped `public-only` — a private repository is invisible to the service, not filtered by it.
@@ -39,6 +40,10 @@
 //	IPCR_ADMIN_TOKEN_FILE  its token (default /srv/ipcr-state/admin-token)
 //	KUBO_KEYSTORE          Kubo's keystore, read-only, for key backups (default /srv/ipcr-keystore)
 //	IMPORT_PUBLISHER       the publisher key's name (default forge)
+//	IPCR_ROOT_ORG          organisation published at the root of the forge's name, until changed in
+//	                       the admin page (default: none)
+//	GATE_CREDENTIALS       the gate's credentials.json (default /bridge/gate/credentials.json)
+//	IPCR_STAGING_AUTH      IPCR's own staging credential (default /srv/ipcr-state/staging-auth)
 package main
 
 import (
@@ -71,8 +76,10 @@ func main() {
 		err = setup()
 	case "health":
 		err = health()
+	case "gate":
+		err = gateMain()
 	default:
-		err = fmt.Errorf("usage: %s serve | setup | health", os.Args[0])
+		err = fmt.Errorf("usage: %s serve | setup | health | gate", os.Args[0])
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -128,10 +135,14 @@ func serve() error {
 		if err != nil {
 			return err
 		}
+		adminGitea := newGitea(m.gitea.base, m.gitea.owner, secrets+"/gitea-admin-token")
 		adm := &adminAPI{
 			ipcr: strings.TrimRight(ipcr, "/"), tokenFile: env("IPCR_ADMIN_TOKEN_FILE", "/srv/ipcr-state/admin-token"),
 			keystore: env("KUBO_KEYSTORE", "/srv/ipcr-keystore"), publisher: env("IMPORT_PUBLISHER", "forge"),
-			settings: stateDir + "/admin.json", gitea: m.gitea, http: &http.Client{Timeout: 3 * time.Minute},
+			settings: stateDir + "/admin.json", gitea: m.gitea, admin: adminGitea, rootOrg: os.Getenv("IPCR_ROOT_ORG"),
+			creds: &pushCreds{file: env("GATE_CREDENTIALS", stateDir+"/gate/credentials.json"),
+				stagingAuth: env("IPCR_STAGING_AUTH", "/srv/ipcr-state/staging-auth"), gitea: adminGitea},
+			http: &http.Client{Timeout: 3 * time.Minute},
 		}
 		adminRoutes(mux, au, adm)
 		// IPCR publishes nothing until it has the list (IMPORT_ALLOW_REQUIRED): send it as soon as

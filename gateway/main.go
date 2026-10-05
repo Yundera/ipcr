@@ -312,6 +312,18 @@ func publishImage(ctx context.Context, key, repo, tag, root string) (string, err
 	return name + "/" + repo, nil
 }
 
+// publishPaths sets <tag> → root under every one of paths in the publisher tree, in one update.
+func publishPaths(ctx context.Context, key string, paths []string, tag, root string) (string, error) {
+	return updateTree(ctx, key, publisherDir(key), 0, func(base string) error {
+		for _, p := range paths {
+			if err := setTag(ctx, base+"/"+p, tag, root); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func publisherDir(key string) string { return "/publishers/" + key }
 
 // One published tree at a time: two writers would each publish a tree missing the other's change.
@@ -434,10 +446,14 @@ func publishRecord(ctx context.Context, key, dir string, seq uint64) (string, er
 // (aptero.eth/myapp). A name that points straight at an image root (not a tag directory) is
 // accepted for the "latest" tag.
 func resolveTag(ctx context.Context, name, tag string) (string, error) {
+	base, err := namePath(ctx, name)
+	if err != nil {
+		return "", err
+	}
 	var r struct{ Path string }
-	err := kuboJSON(ctx, "resolve", url.Values{"arg": {"/ipns/" + name + "/" + tag}, "recursive": {"true"}}, &r)
+	err = kuboJSON(ctx, "resolve", url.Values{"arg": {base + "/" + tag}, "recursive": {"true"}}, &r)
 	if err != nil && tag == "latest" {
-		err = kuboJSON(ctx, "resolve", url.Values{"arg": {"/ipns/" + name}, "recursive": {"true"}}, &r)
+		err = kuboJSON(ctx, "resolve", url.Values{"arg": {base}, "recursive": {"true"}}, &r)
 	}
 	if err != nil {
 		return "", err
@@ -445,12 +461,90 @@ func resolveTag(ctx context.Context, name, tag string) (string, error) {
 	return strings.TrimPrefix(r.Path, "/ipfs/"), nil
 }
 
+// namePath is where a name's tag directory is: /ipns/<name> in general, but for a name this node
+// publishes, /ipfs/<its current tree>/<path>, read from the node's own record without Kubo's cache
+// (see ownName). Only `name/resolve` honours nocache; the generic `resolve` ignores it.
+func namePath(ctx context.Context, name string) (string, error) {
+	name, own := ownName(ctx, name)
+	if !own {
+		return "/ipns/" + name, nil
+	}
+	key, rest, _ := strings.Cut(name, "/")
+	var r struct{ Path string }
+	if err := kuboJSON(ctx, "name/resolve", url.Values{"arg": {key}, "nocache": {"true"}}, &r); err != nil {
+		return "", err
+	}
+	if rest != "" {
+		return r.Path + "/" + rest, nil
+	}
+	return r.Path, nil
+}
+
+// ownName rewrites a name published by this node, directly (k51…/app) or through a DNSLink or ENS
+// name pointing at one of its keys (example.eth/app), to the key itself, and says so. Such names
+// are resolved without Kubo's cache: Kubo does not always refresh its cache when it publishes (a
+// tree published again after a change in between kept resolving to the in-between tree for the
+// record's TTL), and the node's own record is local, so skipping the cache costs nothing.
+func ownName(ctx context.Context, name string) (string, bool) {
+	first, rest, _ := strings.Cut(name, "/")
+	ids := ownKeyIDs(ctx)
+	if ids[first] {
+		return name, true
+	}
+	if !strings.Contains(first, ".") {
+		return name, false
+	}
+	var r struct{ Path string }
+	if kuboJSON(ctx, "resolve", url.Values{"arg": {"/ipns/" + first}, "recursive": {"false"}}, &r) != nil {
+		return name, false
+	}
+	k := strings.TrimPrefix(strings.TrimSuffix(r.Path, "/"), "/ipns/")
+	if !ids[k] {
+		return name, false
+	}
+	if rest != "" {
+		return k + "/" + rest, true
+	}
+	return k, true
+}
+
+var ownKeys struct {
+	sync.Mutex
+	ids map[string]bool
+	at  time.Time
+}
+
+// ownKeyIDs: this node's IPNS names (k51…), refreshed every 30 s.
+func ownKeyIDs(ctx context.Context) map[string]bool {
+	ownKeys.Lock()
+	defer ownKeys.Unlock()
+	if ownKeys.ids != nil && time.Since(ownKeys.at) < 30*time.Second {
+		return ownKeys.ids
+	}
+	keys, err := listKeys(ctx)
+	if err != nil {
+		return ownKeys.ids
+	}
+	ids := map[string]bool{}
+	for _, k := range keys {
+		if k.Name != "self" {
+			ids[k.Id] = true
+		}
+	}
+	ownKeys.ids, ownKeys.at = ids, time.Now()
+	return ids
+}
+
 // listTags returns every image root in the name's tag directory (used when a pull starts by digest).
 func listTags(ctx context.Context, name string) []string {
+	base, err := namePath(ctx, name)
+	if err != nil {
+		return nil
+	}
 	var ls struct {
 		Objects []struct{ Links []struct{ Name, Hash string } }
 	}
-	if err := kuboJSON(ctx, "ls", arg("/ipns/"+name), &ls); err != nil || len(ls.Objects) == 0 {
+	if err := kuboJSON(ctx, "ls", arg(base), &ls); err != nil || len(ls.Objects) == 0 {
 		return nil
 	}
 	var roots []string
@@ -590,6 +684,9 @@ func serve() error {
 		ociError(w, http.StatusNotFound, code, ref+" not found under /ipns/"+name)
 	})
 
+	if err := ensureImportAuth(); err != nil {
+		return fmt.Errorf("IMPORT_AUTH_FILE: %w", err)
+	}
 	if w := os.Getenv("IMPORT_WATCH"); w != "" {
 		every, err := time.ParseDuration(env("IMPORT_INTERVAL", "60s"))
 		if err != nil {

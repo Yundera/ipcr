@@ -19,7 +19,29 @@ import (
 //go:embed all:example
 var exampleFiles embed.FS
 
-const tokenName = "ipcr-forge-bridge"
+const (
+	tokenName      = "ipcr-forge-bridge"
+	adminTokenName = "ipcr-forge-secrets"
+)
+
+// ensureOrg creates the public organisation org, owned by the admin, unless it exists.
+func ensureOrg(g *gitea, org string) error {
+	code, err := g.call("GET", "/orgs/"+org, nil, nil)
+	if code == http.StatusOK {
+		return nil
+	}
+	if code != http.StatusNotFound {
+		return err
+	}
+	if _, err := g.call("POST", "/admin/users/"+g.owner+"/orgs", map[string]any{
+		"username": org, "visibility": "public",
+		"description": "Its public repositories publish images at the root of the forge's name.",
+	}, nil); err != nil {
+		return err
+	}
+	log.Printf("setup: created organisation %s", org)
+	return nil
+}
 
 // setup is the install step, run after the stack is up and on every start (each action is
 // idempotent). It signs in once as the admin with the server's default app password, because
@@ -30,7 +52,10 @@ const tokenName = "ipcr-forge-bridge"
 //	SECRETS_DIR/hook-secret  the webhook's HMAC key. Generated only when missing.
 //	a system webhook         every repository's push/create/delete/repository events → HOOK_URL,
 //	                         created or repaired (matched by URL), never duplicated.
-//	EXAMPLE_REPO             a public example repository with a workflow, created when absent.
+//	SECRETS_DIR/gitea-admin-token  write:repository + read:user: push secrets, name collisions.
+//	IPCR_ROOT_ORG            the root organisation, created when absent (public, owned by the admin).
+//	EXAMPLE_REPO             a public example repository with a workflow, created when absent, in
+//	                         the root organisation when there is one.
 //	an OAuth2 application    the admin pages' Gitea login (PUBLIC_HOSTS → its redirect URIs);
 //	                         SECRETS_DIR/oauth-client-id and oauth-client-secret.
 //
@@ -78,6 +103,36 @@ func setup() error {
 		log.Printf("setup: token %s written", tokenName)
 	}
 
+	// The admin-scoped token: sets each publishing repository's IPCR_PUSH_TOKEN secret, and checks
+	// short-path collisions against every user and organisation. Not public-only: an organisation
+	// may be private and still own the name.
+	adminTokenFile := filepath.Join(secrets, "gitea-admin-token")
+	if b, _ := os.ReadFile(adminTokenFile); len(strings.TrimSpace(string(b))) == 0 {
+		g.call("DELETE", "/users/"+g.owner+"/tokens/"+adminTokenName, nil, nil)
+		var t struct {
+			SHA1 string `json:"sha1"`
+		}
+		if _, err := g.call("POST", "/users/"+g.owner+"/tokens", map[string]any{
+			"name": adminTokenName, "scopes": []string{"write:repository", "read:user", "read:organization"},
+		}, &t); err != nil {
+			return fmt.Errorf("token: %w", err)
+		}
+		if err := writeSecret(adminTokenFile, t.SHA1); err != nil {
+			return err
+		}
+		log.Printf("setup: token %s written", adminTokenName)
+	}
+
+	// The root organisation: its repositories are also published at the root of the forge's name.
+	owner := g.owner
+	if org := strings.ToLower(env("IPCR_ROOT_ORG", "")); org != "" {
+		if err := ensureOrg(g, org); err != nil {
+			log.Printf("setup: organisation %s: %v", org, err)
+		} else {
+			owner = org
+		}
+	}
+
 	secretFile := filepath.Join(secrets, "hook-secret")
 	secret, _ := os.ReadFile(secretFile)
 	if strings.TrimSpace(string(secret)) == "" {
@@ -100,7 +155,7 @@ func setup() error {
 
 	if name := env("EXAMPLE_REPO", "ipcr-hello"); name != "-" && name != "" {
 		// Not fatal: the forge works without its example.
-		if err := ensureExample(g, name); err != nil {
+		if err := ensureExample(g, owner, name); err != nil {
 			log.Printf("setup: example repository: %v", err)
 		}
 	}
@@ -146,18 +201,22 @@ func ensureHook(g *gitea, url, secret string) error {
 
 // ensureExample creates <owner>/<name>, public, with the files under example/ in one commit. A
 // repository that already has content is left as it is: it may be the user's by now.
-func ensureExample(g *gitea, name string) error {
+func ensureExample(g *gitea, owner, name string) error {
 	var r repo
-	code, err := g.call("GET", "/repos/"+g.owner+"/"+name, nil, &r)
+	code, err := g.call("GET", "/repos/"+owner+"/"+name, nil, &r)
 	switch {
 	case code == http.StatusNotFound:
-		if _, err := g.call("POST", "/admin/users/"+g.owner+"/repos", map[string]any{
+		create := "/admin/users/" + owner + "/repos"
+		if owner != g.owner {
+			create = "/orgs/" + owner + "/repos"
+		}
+		if _, err := g.call("POST", create, map[string]any{
 			"name": name, "private": false, "default_branch": "main",
 			"description": "Example: a tag here builds an image, published on IPFS by IPCR and mirrored to Radicle.",
 		}, &r); err != nil {
 			return err
 		}
-		log.Printf("setup: created %s/%s", g.owner, name)
+		log.Printf("setup: created %s/%s", owner, name)
 	case err != nil:
 		return err
 	case !r.Empty:
@@ -181,7 +240,7 @@ func ensureExample(g *gitea, name string) error {
 	if err != nil {
 		return err
 	}
-	_, err = g.call("POST", "/repos/"+g.owner+"/"+name+"/contents", map[string]any{
+	_, err = g.call("POST", "/repos/"+owner+"/"+name+"/contents", map[string]any{
 		"branch": "main", "message": "Example: a Dockerfile and the workflow that publishes it", "files": files,
 	}, nil)
 	return err
@@ -226,9 +285,24 @@ func ensureOAuthApp(g *gitea, hosts []string, secrets string) error {
 			continue
 		}
 		if haveSecret {
-			// Keep it (and its secret); only follow a change of hosts.
-			_, err := g.call("PATCH", fmt.Sprintf("/user/applications/oauth2/%d", app.ID), body, nil)
-			return err
+			// Keep it, and its secret. Gitea regenerates the secret on every update, so only
+			// update when the hosts changed, and keep the secret it hands back.
+			if strings.Join(app.RedirectURIs, ",") == strings.Join(redirects, ",") {
+				return nil
+			}
+			var updated struct {
+				ClientSecret string `json:"client_secret"`
+			}
+			if _, err := g.call("PATCH", fmt.Sprintf("/user/applications/oauth2/%d", app.ID), body, &updated); err != nil {
+				return err
+			}
+			if updated.ClientSecret != "" {
+				if err := writeSecret(secretFile, updated.ClientSecret); err != nil {
+					return err
+				}
+			}
+			log.Printf("setup: OAuth2 app %s now for %s", oauthAppName, strings.Join(redirects, ", "))
+			return nil
 		}
 		if _, err := g.call("DELETE", fmt.Sprintf("/user/applications/oauth2/%d", app.ID), nil, nil); err != nil {
 			return err

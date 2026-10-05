@@ -171,7 +171,8 @@ func TestExampleEmbedded(t *testing.T) {
 		}
 	}
 	b, _ := exampleFiles.ReadFile("example/.gitea/workflows/build.yml")
-	if !strings.Contains(string(b), "localhost:5000/${{ github.repository }}") || !strings.Contains(string(b), "network=host") {
+	if !strings.Contains(string(b), "localhost:5000/${{ github.repository }}") || !strings.Contains(string(b), "network=host") ||
+		!strings.Contains(string(b), "secrets.IPCR_PUSH_TOKEN") {
 		t.Error("example workflow lost its staging registry lines")
 	}
 }
@@ -408,7 +409,7 @@ func TestCallback(t *testing.T) {
 	}
 }
 
-func TestAllowlist(t *testing.T) {
+func TestPlan(t *testing.T) {
 	mk := func(name string, f func(*repo)) repo {
 		r := repo{FullName: name}
 		if f != nil {
@@ -421,10 +422,22 @@ func TestAllowlist(t *testing.T) {
 		mk("owner/off", nil),
 		mk("owner/secret", func(r *repo) { r.Private = true }),
 		mk("owner/fork", func(r *repo) { r.Fork = true }),
-		mk("org/thing", nil),
+		mk("Metadec/Hello", nil),
+		mk("metadec/owner", nil), // short path /owner is owner/'s folder
+		mk("metadec/bob", nil),   // a Gitea user is named bob
+		mk("metadec/off2", nil),
 	}
-	got := strings.Join(allowlist(repos, []string{"owner/off"}), ",")
-	if got != "org/thing,owner/app" {
-		t.Errorf("allowlist = %s", got)
+	p := plan(repos, []string{"owner/off", "metadec/off2"}, "metadec", func(n string) bool { return n == "bob" })
+	if got := strings.Join(p.Repos, ","); got != "metadec/bob,metadec/hello,metadec/owner,owner/app" {
+		t.Errorf("repos = %s", got)
+	}
+	if len(p.Aliases) != 1 || strings.Join(p.Aliases["metadec/hello"], ",") != "hello" {
+		t.Errorf("aliases = %v", p.Aliases)
+	}
+	if p.Collisions["metadec/owner"] == "" || p.Collisions["metadec/bob"] == "" || len(p.Collisions) != 2 {
+		t.Errorf("collisions = %v", p.Collisions)
+	}
+	if q := plan(repos, nil, "", nil); len(q.Aliases) != 0 {
+		t.Errorf("no root organisation, aliases %v", q.Aliases)
 	}
 }

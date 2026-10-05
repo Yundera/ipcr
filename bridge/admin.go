@@ -32,8 +32,11 @@ type adminAPI struct {
 	tokenFile string // ipcrd's admin-token, read through the read-only ipcr/state mount
 	keystore  string // Kubo's keystore folder, read-only
 	publisher string // the publisher key's name (IMPORT_PUBLISHER)
-	settings  string // admin.json: the repositories switched off
-	gitea     *gitea
+	settings  string // admin.json: the repositories switched off, the root organisation
+	gitea     *gitea // public-only, read: lists the repositories
+	admin     *gitea // admin-scoped: name collisions (any user or org), push secrets
+	creds     *pushCreds
+	rootOrg   string // default root organisation (IPCR_ROOT_ORG), until set in the admin page
 	au        *auth
 	http      *http.Client
 
@@ -43,6 +46,24 @@ type adminAPI struct {
 type adminSettings struct {
 	// Repositories (owner/name, lowercase) whose images are not published.
 	Disabled []string `json:"disabled"`
+	// The organisation whose repositories are also published at the root of the forge's name
+	// (metadec/app → /ipns/<forge>/app). nil: IPCR_ROOT_ORG; "": none.
+	RootOrg *string `json:"rootOrg,omitempty"`
+}
+
+func (a *adminAPI) root() string {
+	if s := a.load(); s.RootOrg != nil {
+		return strings.ToLower(*s.RootOrg)
+	}
+	return strings.ToLower(a.rootOrg)
+}
+
+func (a *adminAPI) save(s adminSettings) error {
+	b, _ := json.MarshalIndent(s, "", "  ")
+	if err := os.WriteFile(a.settings+".new", b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(a.settings+".new", a.settings)
 }
 
 func (a *adminAPI) load() adminSettings {
@@ -69,6 +90,9 @@ func (a *adminAPI) routes(mux *http.ServeMux, au *auth) {
 	mux.Handle("POST /admin/api/key/export", guard(http.HandlerFunc(a.export)))
 	mux.Handle("GET /admin/api/repos", guard(http.HandlerFunc(a.listRepos)))
 	mux.Handle("PUT /admin/api/repos", guard(http.HandlerFunc(a.setRepo)))
+	mux.Handle("POST /admin/api/repos/rotate", guard(http.HandlerFunc(a.rotate)))
+	mux.Handle("GET /admin/api/settings", guard(http.HandlerFunc(a.getSettings)))
+	mux.Handle("PUT /admin/api/settings", guard(http.HandlerFunc(a.putSettings)))
 }
 
 func writeJSONResponse(w http.ResponseWriter, v any) {
@@ -148,8 +172,69 @@ type repoToggle struct {
 	Publish  bool   `json:"publish"`
 }
 
-func (a *adminAPI) listRepos(w http.ResponseWriter, r *http.Request) {
+// repoView is a row of the admin page's Repositories tab.
+type repoView struct {
+	repoToggle
+	PublishedAs []string `json:"published_as,omitempty"` // short path first
+	Credential  bool     `json:"credential"`             // the gate knows its IPCR_PUSH_TOKEN
+	Collision   string   `json:"collision,omitempty"`    // why its short path is not used
+}
+
+// pubPlan is what IPCR is told to publish, and why some short paths are not used.
+type pubPlan struct {
+	Repos      []string            // owner/repo, lowercase
+	Aliases    map[string][]string // owner/repo → short paths
+	Collisions map[string]string   // owner/repo → reason
+}
+
+// plan computes the allowlist: the eligible public repositories not switched off, and for the root
+// organisation's, their short path, unless it would collide with an owner's folder: the name of
+// any Gitea user or organisation (exists), or the owner of another allowed repository.
+func plan(repos []repo, disabled []string, root string, exists func(string) bool) pubPlan {
+	p := pubPlan{Aliases: map[string][]string{}, Collisions: map[string]string{}}
+	off := map[string]bool{}
+	for _, d := range disabled {
+		off[d] = true
+	}
+	owners := map[string]bool{}
+	for i := range repos {
+		n := strings.ToLower(repos[i].FullName)
+		if eligible(&repos[i]) && !off[n] {
+			p.Repos = append(p.Repos, n)
+			owners[strings.SplitN(n, "/", 2)[0]] = true
+		}
+	}
+	sort.Strings(p.Repos)
+	if root == "" {
+		return p
+	}
+	for _, n := range p.Repos {
+		owner, name, _ := strings.Cut(n, "/")
+		if owner != root {
+			continue
+		}
+		switch {
+		case owners[name]:
+			p.Collisions[n] = "short path /" + name + " is the folder of " + name + "'s own repositories"
+		case exists != nil && exists(name):
+			p.Collisions[n] = "a Gitea user or organisation is named " + name + ": its repositories would share /" + name
+		default:
+			p.Aliases[n] = []string{name}
+		}
+	}
+	return p
+}
+
+func (a *adminAPI) currentPlan() (pubPlan, []repo, error) {
 	repos, err := a.gitea.publicRepos()
+	if err != nil {
+		return pubPlan{}, nil, err
+	}
+	return plan(repos, a.load().Disabled, a.root(), a.admin.exists), repos, nil
+}
+
+func (a *adminAPI) listRepos(w http.ResponseWriter, r *http.Request) {
+	p, repos, err := a.currentPlan()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -158,12 +243,18 @@ func (a *adminAPI) listRepos(w http.ResponseWriter, r *http.Request) {
 	for _, d := range a.load().Disabled {
 		disabled[d] = true
 	}
-	out := []repoToggle{}
+	out := []repoView{}
 	for _, rp := range repos {
-		if eligible(&rp) {
-			n := strings.ToLower(rp.FullName)
-			out = append(out, repoToggle{FullName: n, Publish: !disabled[n]})
+		if !eligible(&rp) {
+			continue
 		}
+		n := strings.ToLower(rp.FullName)
+		v := repoView{repoToggle: repoToggle{FullName: n, Publish: !disabled[n]}, Collision: p.Collisions[n]}
+		if v.Publish {
+			v.PublishedAs = append(append([]string{}, p.Aliases[n]...), n)
+			v.Credential = a.creds != nil && a.creds.has(n)
+		}
+		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FullName < out[j].FullName })
 	writeJSONResponse(w, out)
@@ -189,58 +280,95 @@ func (a *adminAPI) setRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(keep)
 	s.Disabled = keep
-	b, _ := json.MarshalIndent(s, "", "  ")
-	err := os.WriteFile(a.settings+".new", b, 0o644)
-	if err == nil {
-		err = os.Rename(a.settings+".new", a.settings)
-	}
+	err := a.save(s)
 	a.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := a.pushAllowlist(); err != nil {
-		http.Error(w, "saved, but IPCR did not take the new list: "+err.Error(), http.StatusServiceUnavailable)
+		http.Error(w, "saved, but not fully applied: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	writeJSONResponse(w, req)
 }
 
+// rotate gives a repository a new IPCR_PUSH_TOKEN: when it changed hands, or the old one leaked.
+func (a *adminAPI) rotate(w http.ResponseWriter, r *http.Request) {
+	var req repoToggle
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || req.FullName == "" {
+		http.Error(w, "{full_name}?", http.StatusBadRequest)
+		return
+	}
+	p, _, err := a.currentPlan()
+	if err == nil {
+		err = a.creds.sync(p.Repos, req.FullName)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSONResponse(w, map[string]string{"rotated": req.FullName})
+}
+
+func (a *adminAPI) getSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSONResponse(w, map[string]string{"rootOrg": a.root(), "rootOrgDefault": strings.ToLower(a.rootOrg)})
+}
+
+func (a *adminAPI) putSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RootOrg string `json:"rootOrg"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "{rootOrg}?", http.StatusBadRequest)
+		return
+	}
+	org := strings.ToLower(strings.TrimSpace(req.RootOrg))
+	if org != "" && !a.admin.exists(org) {
+		http.Error(w, "no Gitea organisation named "+org, http.StatusBadRequest)
+		return
+	}
+	a.mu.Lock()
+	s := a.load()
+	s.RootOrg = &org
+	err := a.save(s)
+	a.mu.Unlock()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.pushAllowlist(); err != nil {
+		http.Error(w, "saved, but not fully applied: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSONResponse(w, map[string]string{"rootOrg": org})
+}
+
 // eligible: the repositories whose images may be published — the same that are mirrored.
 func eligible(r *repo) bool { return r.public() && !r.Fork && !r.Mirror }
 
-// allowlist is what ipcrd publishes: the image names CI builds are pushed under
-// (localhost:5000/<owner>/<repo>, lowercased by docker/metadata-action).
-func allowlist(repos []repo, disabled []string) []string {
-	off := map[string]bool{}
-	for _, d := range disabled {
-		off[d] = true
-	}
-	var out []string
-	for i := range repos {
-		n := strings.ToLower(repos[i].FullName)
-		if eligible(&repos[i]) && !off[n] {
-			out = append(out, n)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// pushAllowlist sends ipcrd the current list. Called on every reconcile and on every toggle.
+// pushAllowlist sends ipcrd the current plan and gives the gate the matching credentials. Called
+// on every reconcile, toggle and root-organisation change.
 func (a *adminAPI) pushAllowlist() error {
-	repos, err := a.gitea.publicRepos()
+	p, _, err := a.currentPlan()
 	if err != nil {
 		return err
 	}
-	return a.sendAllowlist(allowlist(repos, a.load().Disabled))
+	if err := a.sendAllowlist(p); err != nil {
+		return err
+	}
+	if a.creds != nil {
+		return a.creds.sync(p.Repos, "")
+	}
+	return nil
 }
 
-func (a *adminAPI) sendAllowlist(list []string) error {
+func (a *adminAPI) sendAllowlist(p pubPlan) error {
+	list := p.Repos
 	if list == nil {
 		list = []string{}
 	}
-	body, _ := json.Marshal(map[string]any{"allow": map[string]any{"required": true, "repos": list}})
+	body, _ := json.Marshal(map[string]any{"allow": map[string]any{"required": true, "repos": list, "aliases": p.Aliases}})
 	req, _ := http.NewRequest("PATCH", a.ipcr+"/admin/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.token())

@@ -68,9 +68,13 @@ func (m *mirror) rad(dir string, args ...string) (string, error) {
 // makes this node seed it (the node's policy is `block`: nothing is kept unless asked) and adds
 // the `rad` remote that pushes go to.
 func (m *mirror) radInit(dir string, r *repo) (string, error) {
-	desc := r.Description
-	if desc == "" {
-		desc = "Mirrored from Gitea: " + r.FullName
+	// A repository's ID is a hash of its first identity document (name, description, default
+	// branch, delegates). Two Gitea repositories with the same name and description (an example
+	// copied into an organisation) would get the same ID on this node, and the second rad init
+	// fails ("attempt to reinitialize"). The Gitea path makes the document unique per forge.
+	desc := "Mirrored from Gitea: " + r.FullName
+	if r.Description != "" {
+		desc = r.Description + " (Gitea: " + r.FullName + ")"
 	}
 	out, err := m.rad(dir, "init", dir, "--name", r.Name, "--description", desc,
 		"--default-branch", r.DefaultBranch, "--public", "--no-confirm")

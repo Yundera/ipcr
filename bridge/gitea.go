@@ -140,3 +140,13 @@ func (g *gitea) repoByID(id int64) (*repo, error) {
 	}
 	return &r, nil
 }
+
+// exists reports whether a Gitea user or organisation has this name (an admin-scoped token sees
+// private ones too). On doubt (Gitea unreachable) it answers yes: a short path is then not used.
+func (g *gitea) exists(name string) bool {
+	if g == nil {
+		return false
+	}
+	code, err := g.call("GET", "/users/"+url.PathEscape(name), nil, nil)
+	return code == http.StatusOK || (err != nil && code != http.StatusNotFound)
+}

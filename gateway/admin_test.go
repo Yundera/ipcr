@@ -384,3 +384,103 @@ func TestKeyImportReusesKeptKey(t *testing.T) {
 		}
 	}
 }
+
+func TestAliasesCollisions(t *testing.T) {
+	w, _ := newWatcher("http://staging:5000", time.Minute, t.TempDir())
+	var c config
+	c.Allow.Repos = []string{"metadec/app", "metadec/tools", "metadec/alice", "alice/thing", "metadec/x", "metadec/y"}
+	c.Allow.Aliases = map[string][]string{
+		"metadec/app":   {"app"},
+		"metadec/tools": {"Tools"}, // lowercased
+		"metadec/alice": {"alice"}, // alice/ is another owner's folder
+		"metadec/x":     {"same"},
+		"metadec/y":     {"same"}, // claimed by metadec/x first
+		"metadec/bad":   {"a/b"},
+	}
+	got := w.aliases(c)
+	want := map[string][]string{"metadec/app": {"app"}, "metadec/tools": {"tools"}, "metadec/x": {"same"}}
+	if len(got) != len(want) {
+		t.Fatalf("aliases %v, want %v", got, want)
+	}
+	for r, a := range want {
+		if strings.Join(got[r], ",") != strings.Join(a, ",") {
+			t.Errorf("%s: %v, want %v", r, got[r], a)
+		}
+	}
+	// A published repository's owner folder is taken too.
+	w.pub.set("app/server", "k51/app/server", "1", publishedTag{CID: "c"})
+	if a := w.aliases(c)["metadec/app"]; len(a) != 0 {
+		t.Errorf("alias app collides with published app/server: %v", a)
+	}
+}
+
+func TestSyncAliases(t *testing.T) {
+	kubo := &fakeKubo{keys: map[string]string{"forge": "k51forge"}}
+	ksrv := httptest.NewServer(kubo)
+	defer ksrv.Close()
+	old := kuboAPI
+	kuboAPI = ksrv.URL
+	defer func() { kuboAPI = old }()
+	w, _ := newWatcher("http://staging:5000", time.Minute, t.TempDir())
+	w.publisher = "forge"
+	w.pub.set("metadec/app", "k51forge/metadec/app", "1.0.0", publishedTag{CID: "bafy1"})
+	w.pub.set("metadec/app", "k51forge/metadec/app", "latest", publishedTag{CID: "bafy1"})
+	var c config
+	c.Allow.Repos = []string{"metadec/app"}
+	c.Allow.Aliases = map[string][]string{"metadec/app": {"app"}}
+
+	w.syncAliases(context.Background(), c)
+	cps := 0
+	for _, call := range kubo.calls {
+		if strings.HasPrefix(call, "files/cp /ipfs/bafy1 /publishers/forge/app/") {
+			cps++
+		}
+	}
+	if cps != 2 || strings.Join(w.pub.Images["metadec/app"].Aliases, ",") != "app" {
+		t.Fatalf("add: %d copies, aliases %v; calls %v", cps, w.pub.Images["metadec/app"].Aliases, kubo.calls)
+	}
+
+	// The root organisation changes: the short path goes.
+	kubo.calls = nil
+	c.Allow.Aliases = nil
+	w.syncAliases(context.Background(), c)
+	removed := false
+	for _, call := range kubo.calls {
+		removed = removed || call == "files/rm /publishers/forge/app"
+	}
+	if !removed || len(w.pub.Images["metadec/app"].Aliases) != 0 {
+		t.Errorf("drop: removed %v, aliases %v; calls %v", removed, w.pub.Images["metadec/app"].Aliases, kubo.calls)
+	}
+}
+
+func TestConfigAliasesOnlyForListedRepos(t *testing.T) {
+	dir := t.TempDir()
+	a := &admin{stateDir: dir}
+	body := `{"allow":{"required":true,"repos":["Metadec/App"],"aliases":{"metadec/app":["App"],"other/x":["x"],"metadec/app2":["a/b"]}}}`
+	rec := httptest.NewRecorder()
+	a.handleConfig(rec, httptest.NewRequest("PATCH", "/admin/config", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	c := loadConfig(dir)
+	if len(c.Allow.Aliases) != 1 || strings.Join(c.Allow.Aliases["metadec/app"], ",") != "app" {
+		t.Errorf("aliases %v", c.Allow.Aliases)
+	}
+}
+
+func TestEnsureImportAuth(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "staging-auth")
+	t.Setenv("IMPORT_AUTH_FILE", f)
+	t.Setenv("IMPORT_AUTH_GENERATE", "true")
+	if err := ensureImportAuth(); err != nil {
+		t.Fatal(err)
+	}
+	a := importAuth()
+	if !strings.HasPrefix(a, "ipcr:") || len(a) < 40 {
+		t.Fatalf("generated %q", a)
+	}
+	ensureImportAuth()
+	if importAuth() != a {
+		t.Error("regenerated on restart")
+	}
+}
