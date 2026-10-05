@@ -1,0 +1,3 @@
+[submodule "ipcr-forge"]
+	path = ipcr-forge
+	url = https://github.com/Yundera/ipcr-forge.git
