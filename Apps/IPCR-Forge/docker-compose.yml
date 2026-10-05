@@ -983,7 +983,7 @@ x-compose-app:
       command:
         - sh
         - -c
-        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" GITEA_URL=http://gitea:3000 IPCR_ROOT_ORG="$IPCR_ROOT_ORG" PUBLIC_HOSTS="ipcr-forge-$APP_DOMAIN,ipcr-forge-$APP_PUBLIC_IP_DASH.nip.io,ipcr-forge-$APP_PUBLIC_IP_DASH.sslip.io" ipcr-forge setup
+        - GITEA_PASSWORD="$APP_DEFAULT_PASSWORD" GITEA_URL=http://gitea:3000 IPCR_ROOT_ORG="${IPCR_ROOT_ORG:-}" PUBLIC_HOSTS="ipcr-forge-$APP_DOMAIN,ipcr-forge-$APP_PUBLIC_IP_DASH.nip.io,ipcr-forge-$APP_PUBLIC_IP_DASH.sslip.io" ipcr-forge setup
       when: always
   webui-host: gitea-${domain}
   webui-path: /
